@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <rect width="640" height="360" fill="#f4ebe0" rx="26" />
+  <rect x="80" y="60" width="320" height="240" fill="#ffffff" rx="18" />
+  <rect x="120" y="100" width="220" height="14" fill="#d45a2a" rx="7" />
+  <rect x="120" y="140" width="200" height="10" fill="#e1c7b1" rx="5" />
+  <rect x="120" y="170" width="200" height="10" fill="#e1c7b1" rx="5" />
+  <rect x="120" y="200" width="200" height="10" fill="#e1c7b1" rx="5" />
+  <rect x="120" y="230" width="200" height="10" fill="#e1c7b1" rx="5" />
+  <circle cx="470" cy="170" r="70" fill="#2a6d6d" opacity="0.16" />
+  <path d="M440 170 L465 195 L510 140" fill="none" stroke="#2a6d6d" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" />
+  <text x="120" y="270" font-family="Space Grotesk, sans-serif" font-size="18" fill="#1c2433">
+    Checklist
+  </text>
+</svg>

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7efe5" />
+      <stop offset="100%" stop-color="#f0dfcf" />
+    </linearGradient>
+  </defs>
+  <rect width="640" height="360" fill="url(#bg)" rx="26" />
+  <rect x="40" y="50" width="260" height="190" fill="#ffffff" rx="18" />
+  <rect x="70" y="82" width="200" height="14" fill="#d45a2a" rx="7" />
+  <rect x="70" y="112" width="160" height="10" fill="#e5b18b" rx="5" />
+  <rect x="70" y="136" width="180" height="10" fill="#e5b18b" rx="5" />
+  <rect x="70" y="160" width="140" height="10" fill="#e5b18b" rx="5" />
+  <circle cx="470" cy="135" r="80" fill="#2a6d6d" opacity="0.16" />
+  <circle cx="470" cy="135" r="56" fill="#2a6d6d" opacity="0.3" />
+  <path d="M470 85 L510 135 L470 185 L430 135 Z" fill="#2a6d6d" />
+  <text x="70" y="280" font-family="Space Grotesk, sans-serif" font-size="22" fill="#1c2433">
+    Mission Briefing
+  </text>
+</svg>

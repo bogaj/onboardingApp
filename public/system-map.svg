@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <rect width="640" height="360" fill="#f7efe6" rx="26" />
+  <rect x="60" y="70" width="200" height="90" fill="#ffffff" rx="16" />
+  <rect x="380" y="70" width="200" height="90" fill="#ffffff" rx="16" />
+  <rect x="220" y="200" width="200" height="90" fill="#ffffff" rx="16" />
+  <path d="M260 115 H380" stroke="#2a6d6d" stroke-width="4" stroke-linecap="round" />
+  <path d="M320 160 V200" stroke="#2a6d6d" stroke-width="4" stroke-linecap="round" />
+  <circle cx="160" cy="115" r="18" fill="#d45a2a" />
+  <circle cx="480" cy="115" r="18" fill="#d45a2a" />
+  <circle cx="320" cy="245" r="18" fill="#d45a2a" />
+  <text x="90" y="130" font-family="IBM Plex Sans, sans-serif" font-size="14" fill="#1c2433">
+    Portal
+  </text>
+  <text x="420" y="130" font-family="IBM Plex Sans, sans-serif" font-size="14" fill="#1c2433">
+    API
+  </text>
+  <text x="260" y="260" font-family="IBM Plex Sans, sans-serif" font-size="14" fill="#1c2433">
+    Monitoring
+  </text>
+</svg>
