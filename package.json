@@ -9,7 +9,11 @@
     "dev:renderer": "vite",
     "build": "tsc -b && vite build && tsc -p electron/tsconfig.json",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "dist:mac": "npm run build && electron-builder -c electron-builder.config.cjs --mac",
+    "dist:win": "npm run build && electron-builder -c electron-builder.config.cjs --win",
+    "dist:mac:dir": "npm run build && electron-builder -c electron-builder.config.cjs --dir --mac",
+    "dist:win:dir": "npm run build && electron-builder -c electron-builder.config.cjs --dir --win"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -26,6 +30,7 @@
     "babel-plugin-react-compiler": "^1.0.0",
     "concurrently": "^9.2.1",
     "electron": "^39.2.7",
+    "electron-builder": "^24.13.3",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",

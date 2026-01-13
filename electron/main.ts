@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
-import path from 'node:path'
+import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import fs from 'node:fs/promises'
+import * as fs from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 
 type SaveFilePayload = {
@@ -13,6 +13,30 @@ type SaveFilePayload = {
 type SaveFileResult = {
   saved: boolean
   path?: string
+}
+
+type LessonExportPayload = {
+  folderName: string
+  data: Uint8Array
+}
+
+type LessonExportResult = {
+  saved: boolean
+  path?: string
+}
+
+type LessonImportResult = {
+  name: string
+  data: Uint8Array
+} | null
+
+type WriteAssetPayload = {
+  data: Uint8Array
+}
+
+type WriteAssetResult = {
+  id: string
+  size: number
 }
 
 type AssetFile = {
@@ -32,6 +56,12 @@ const getAssetsDir = async () => {
   return assetsDir
 }
 
+const getExportsDir = async () => {
+  const exportsDir = path.join(app.getPath('userData'), 'LessonsEksport')
+  await fs.mkdir(exportsDir, { recursive: true })
+  return exportsDir
+}
+
 const createMainWindow = async () => {
   const mainWindow = new BrowserWindow({
     width: 1280,
@@ -40,7 +70,7 @@ const createMainWindow = async () => {
     minHeight: 700,
     backgroundColor: '#f3eee7',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -115,6 +145,62 @@ ipcMain.handle(
     } catch {
       return null
     }
+  },
+)
+
+ipcMain.handle(
+  'write-asset',
+  async (_event, payload: WriteAssetPayload): Promise<WriteAssetResult> => {
+    const assetsDir = await getAssetsDir()
+    const id = randomUUID()
+    const destination = path.join(assetsDir, id)
+    const data = Buffer.from(payload.data)
+    await fs.writeFile(destination, data)
+    return { id, size: data.byteLength }
+  },
+)
+
+ipcMain.handle(
+  'save-lesson-export',
+  async (
+    _event,
+    payload: LessonExportPayload,
+  ): Promise<LessonExportResult> => {
+    const exportsDir = await getExportsDir()
+    const safeName = path
+      .basename(payload.folderName)
+      .replace(/[^a-zA-Z0-9._-]+/g, '_')
+      .trim()
+    if (!safeName) {
+      return { saved: false }
+    }
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      defaultPath: path.join(exportsDir, `${safeName}.zip`),
+      filters: [{ name: 'Lesson export', extensions: ['zip'] }],
+    })
+    if (canceled || !filePath) {
+      return { saved: false }
+    }
+    await fs.writeFile(filePath, Buffer.from(payload.data))
+    return { saved: true, path: filePath }
+  },
+)
+
+ipcMain.handle(
+  'open-lesson-export',
+  async (): Promise<LessonImportResult> => {
+    const exportsDir = await getExportsDir()
+    const result = await dialog.showOpenDialog({
+      defaultPath: exportsDir,
+      properties: ['openFile'],
+      filters: [{ name: 'Lesson export', extensions: ['zip'] }],
+    })
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+    const filePath = result.filePaths[0]
+    const data = await fs.readFile(filePath)
+    return { name: path.basename(filePath), data: new Uint8Array(data) }
   },
 )
 

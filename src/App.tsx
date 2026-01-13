@@ -10,7 +10,7 @@ import JSZip from 'jszip'
 import { marked } from 'marked'
 import './App.css'
 
-marked.setOptions({ mangle: false, headerIds: false })
+marked.use({ mangle: false, headerIds: false } as unknown as object)
 
 const RICH_TEXT_COLORS = [
   { label: 'Czarny', value: '#000000' },
@@ -109,6 +109,13 @@ type Topic = {
   lessons: Lesson[]
 }
 
+type LessonExportBundle = {
+  version: number
+  exportedAt: string
+  topic: { title: string; description?: string }
+  lesson: Lesson
+}
+
 type LightboxImage = ImageItem
 
 type DownloadFile =
@@ -131,11 +138,38 @@ type ElectronSaveFileResult = {
   path?: string
 }
 
+type LessonExportPayload = {
+  folderName: string
+  data: Uint8Array
+}
+
+type LessonExportResult = {
+  saved: boolean
+  path?: string
+}
+
+type LessonImportResult = {
+  name: string
+  data: Uint8Array
+} | null
+
+type WriteAssetPayload = {
+  data: Uint8Array
+}
+
+type WriteAssetResult = {
+  id: string
+  size: number
+}
+
 type ElectronAPI = {
   saveFile: (payload: ElectronSaveFilePayload) => Promise<ElectronSaveFileResult>
   pickFiles: (options?: { filters?: FileFilter[] }) => Promise<AssetFile[]>
   readAsset: (assetId: string) => Promise<Uint8Array | null>
   openExternal: (url: string) => Promise<boolean>
+  saveLessonExport: (payload: LessonExportPayload) => Promise<LessonExportResult>
+  openLessonExport: () => Promise<LessonImportResult>
+  writeAsset: (payload: WriteAssetPayload) => Promise<WriteAssetResult>
 }
 
 type RichToolbarState = {
@@ -535,6 +569,9 @@ const slugify = (value: string) =>
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
 
+const isDefined = <T,>(value: T | null | undefined): value is T =>
+  value !== null && value !== undefined
+
 const createId = (prefix: string) => {
   const suffix =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -609,18 +646,21 @@ const parsePipeLines = (value: string) =>
 
 const parseImageLines = (value: string) =>
   parsePipeLines(value)
-    .map((line) => {
+    .map((line): ImageItem | null => {
       const [src, alt, caption] = line.split('|').map((part) => part.trim())
       if (!src) {
         return null
       }
-      return {
+      const image: ImageItem = {
         src,
         alt: alt || 'Obraz',
-        caption: caption || undefined,
       }
+      if (caption) {
+        image.caption = caption
+      }
+      return image
     })
-    .filter((item): item is ImageItem => Boolean(item))
+    .filter(isDefined)
 
 const formatImageLines = (images: ImageItem[]) =>
   images
@@ -632,7 +672,7 @@ const formatImageLines = (images: ImageItem[]) =>
 
 const parseTextFileLines = (value: string) =>
   parsePipeLines(value)
-    .map((line) => {
+    .map((line): DownloadFile | null => {
       const [name, content] = line.split('|').map((part) => part.trim())
       if (!name) {
         return null
@@ -643,7 +683,7 @@ const parseTextFileLines = (value: string) =>
         content: content || '',
       }
     })
-    .filter((item): item is DownloadFile => Boolean(item))
+    .filter(isDefined)
 
 const isTextDownloadFile = (
   file: DownloadFile,
@@ -811,7 +851,8 @@ const useResolvedAssetSrc = (src: string) => {
         setResolvedSrc('')
         return
       }
-      objectUrl = URL.createObjectURL(new Blob([data]))
+      const safeData = new Uint8Array(data)
+      objectUrl = URL.createObjectURL(new Blob([safeData]))
       setResolvedSrc(objectUrl)
     })
     return () => {
@@ -1095,6 +1136,123 @@ const buildLessonSearchText = (lesson: Lesson) => {
   return normalizeText(parts.join(' '))
 }
 
+const collectLessonAssetIds = (lesson: Lesson) => {
+  const assets = new Set<string>()
+  lesson.rows.forEach((row) => {
+    row.columns.forEach((column) => {
+      if (column.type === 'image') {
+        column.images.forEach((image) => {
+          if (isAssetSrc(image.src)) {
+            assets.add(assetIdFromSrc(image.src))
+          }
+        })
+      }
+      if (column.type === 'video' && column.assetId) {
+        assets.add(column.assetId)
+      }
+      if (column.type === 'download') {
+        column.files.forEach((file) => {
+          if (file.kind === 'asset') {
+            assets.add(file.id)
+          }
+        })
+      }
+    })
+  })
+  return assets
+}
+
+const remapLessonForImport = (
+  lesson: Lesson,
+  assetIdMap: Record<string, string>,
+  assetSizeMap: Record<string, number>,
+) => {
+  const mapAssetId = (id?: string) => (id ? assetIdMap[id] : undefined)
+  const mapAssetSize = (id?: string) =>
+    id ? assetSizeMap[id] ?? undefined : undefined
+
+  return {
+    ...lesson,
+    id: createId('lesson'),
+    rows: lesson.rows.map((row) => ({
+      ...row,
+      id: createId('row'),
+      columns: row.columns.map((column) => {
+        if (column.type === 'text') {
+          return { ...column, id: createId('component') }
+        }
+        if (column.type === 'video') {
+          const mappedId = mapAssetId(column.assetId)
+          return {
+            ...column,
+            id: createId('component'),
+            assetId: mappedId,
+            assetName: mappedId ? column.assetName : undefined,
+            assetSize: mapAssetSize(mappedId),
+          }
+        }
+        if (column.type === 'image') {
+          const images = column.images
+            .map((image): ImageItem | null => {
+              if (!isAssetSrc(image.src)) {
+                return image
+              }
+              const originalId = assetIdFromSrc(image.src)
+              const mappedId = mapAssetId(originalId)
+              if (!mappedId) {
+                return null
+              }
+              const size = mapAssetSize(mappedId) ?? image.size
+              const nextImage: ImageItem = {
+                ...image,
+                src: `asset:${mappedId}`,
+              }
+              if (typeof size === 'number') {
+                nextImage.size = size
+              } else {
+                delete nextImage.size
+              }
+              return nextImage
+            })
+            .filter(isDefined)
+          return {
+            ...column,
+            id: createId('component'),
+            images,
+          }
+        }
+        const files = column.files
+          .map((file): DownloadFile | null => {
+            if (file.kind !== 'asset') {
+              return file
+            }
+            const mappedId = mapAssetId(file.id)
+            if (!mappedId) {
+              return null
+            }
+            const size = mapAssetSize(mappedId) ?? file.size
+            const nextFile: DownloadFile = {
+              ...file,
+              id: mappedId,
+            }
+            if (typeof size === 'number') {
+              nextFile.size = size
+            } else {
+              delete nextFile.size
+            }
+            return nextFile
+          })
+          .filter(isDefined)
+        return {
+          ...column,
+          id: createId('component'),
+          files,
+        }
+      }),
+    })),
+  }
+}
+
 const isSafeExternalUrl = (value: string) => {
   try {
     const url = new URL(value)
@@ -1118,7 +1276,7 @@ const openExternalLink = async (url: string) => {
 }
 
 const MarkdownBlock = ({ markdown }: { markdown: string }) => {
-  const html = useMemo(() => marked.parse(markdown), [markdown])
+  const html = useMemo(() => marked.parse(markdown) as string, [markdown])
   const handleClick = (event: MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null
     const link = target?.closest('a')
@@ -1817,7 +1975,7 @@ function App() {
     const source = componentForm.markdown.trim()
     const html = /<\/?[a-z][\s\S]*>/i.test(source)
       ? source
-      : marked.parse(source)
+      : (marked.parse(source) as string)
     element.innerHTML = html
   }, [componentForm.markdown, componentForm.type, textEditorMode])
 
@@ -2224,6 +2382,197 @@ function App() {
     )
   }
 
+  const handleExportLesson = async () => {
+    if (!activeLesson || !activeTopic) {
+      return
+    }
+    const electronApi = getElectronApi()
+    if (!electronApi?.saveLessonExport || !electronApi.readAsset) {
+      window.alert(
+        'Eksport lekcji jest dostepny tylko w aplikacji desktopowej.',
+      )
+      return
+    }
+
+    const assetIds = Array.from(collectLessonAssetIds(activeLesson))
+    const missingAssets: string[] = []
+    const zip = new JSZip()
+    for (const assetId of assetIds) {
+      const data = await electronApi.readAsset(assetId)
+      if (data) {
+        zip.file(`assets/${assetId}`, data)
+      } else {
+        missingAssets.push(assetId)
+      }
+    }
+
+    const payload: LessonExportBundle = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      topic: {
+        title: activeTopic.title,
+        description: activeTopic.description,
+      },
+      lesson: activeLesson,
+    }
+    zip.file('lesson.json', JSON.stringify(payload, null, 2))
+    const data = await zip.generateAsync({ type: 'uint8array' })
+    const exportName = `${slugify(activeTopic.title)}_Lekcja_${activeLesson.number}`
+    const result = await electronApi.saveLessonExport({
+      folderName: exportName,
+      data,
+    })
+    if (!result.saved) {
+      window.alert('Nie udalo sie zapisac eksportu lekcji.')
+      return
+    }
+    if (missingAssets.length) {
+      window.alert(
+        `Wyeksportowano lekcje, ale brakuje plikow: ${missingAssets.join(
+          ', ',
+        )}.`,
+      )
+    }
+    if (result.path) {
+      window.alert(`Eksport zapisany w: ${result.path}`)
+    } else {
+      window.alert('Eksport zapisany w folderze LessonsEksport.')
+    }
+  }
+
+  const handleImportLesson = async () => {
+    const electronApi = getElectronApi()
+    if (!electronApi?.openLessonExport || !electronApi.writeAsset) {
+      window.alert(
+        'Import lekcji jest dostepny tylko w aplikacji desktopowej.',
+      )
+      return
+    }
+
+    const result = await electronApi.openLessonExport()
+    if (!result) {
+      return
+    }
+
+    let zip: JSZip
+    try {
+      zip = await JSZip.loadAsync(result.data)
+    } catch {
+      window.alert('Nie udalo sie otworzyc paczki lekcji.')
+      return
+    }
+
+    const lessonFile = zip.file('lesson.json')
+    if (!lessonFile) {
+      window.alert('Brak pliku lesson.json w paczce.')
+      return
+    }
+
+    let payload: LessonExportBundle
+    try {
+      payload = JSON.parse(await lessonFile.async('string')) as LessonExportBundle
+    } catch {
+      window.alert('Nie udalo sie odczytac pliku lesson.json.')
+      return
+    }
+
+    if (!payload?.lesson || !payload?.topic?.title) {
+      window.alert('Paczka lekcji jest niepoprawna.')
+      return
+    }
+
+    const topicKey = normalizeText(payload.topic.title)
+    const lessonKey = normalizeText(payload.lesson.title)
+    const existingTopicIndex = topics.findIndex(
+      (topic) => normalizeText(topic.title) === topicKey,
+    )
+    const existingLessonIndex =
+      existingTopicIndex === -1
+        ? -1
+        : topics[existingTopicIndex].lessons.findIndex(
+            (lesson) => normalizeText(lesson.title) === lessonKey,
+          )
+
+    if (existingLessonIndex !== -1) {
+      const confirmReplace = window.confirm(
+        'Czy chcesz zastapic istniejaca lekcje?',
+      )
+      if (!confirmReplace) {
+        return
+      }
+    }
+
+    const assetIds = Array.from(collectLessonAssetIds(payload.lesson))
+    const assetIdMap: Record<string, string> = {}
+    const assetSizeMap: Record<string, number> = {}
+    const missingAssets: string[] = []
+
+    for (const assetId of assetIds) {
+      const entry = zip.file(`assets/${assetId}`)
+      if (!entry) {
+        missingAssets.push(assetId)
+        continue
+      }
+      const data = await entry.async('uint8array')
+      const stored = await electronApi.writeAsset({ data })
+      assetIdMap[assetId] = stored.id
+      assetSizeMap[stored.id] = stored.size
+    }
+
+    const importedLesson = remapLessonForImport(
+      payload.lesson,
+      assetIdMap,
+      assetSizeMap,
+    )
+
+    let replacedLessonId: string | null = null
+    let nextTopics = [...topics]
+
+    if (existingTopicIndex === -1) {
+      const newTopic: Topic = {
+        id: createId('topic'),
+        title: payload.topic.title,
+        description: payload.topic.description ?? '',
+        lessons: [importedLesson],
+      }
+      nextTopics = [...topics, newTopic]
+    } else {
+      const targetTopic = nextTopics[existingTopicIndex]
+      if (existingLessonIndex !== -1) {
+        replacedLessonId = targetTopic.lessons[existingLessonIndex].id
+        const nextLessons = [...targetTopic.lessons]
+        nextLessons.splice(existingLessonIndex, 1, importedLesson)
+        nextTopics[existingTopicIndex] = {
+          ...targetTopic,
+          lessons: nextLessons,
+        }
+      } else {
+        nextTopics[existingTopicIndex] = {
+          ...targetTopic,
+          lessons: [...targetTopic.lessons, importedLesson],
+        }
+      }
+    }
+
+    setTopics(nextTopics)
+    if (replacedLessonId) {
+      setCompletedLessons((current) =>
+        current.filter((id) => id !== replacedLessonId),
+      )
+    }
+    setActiveLessonId(importedLesson.id)
+
+    if (missingAssets.length) {
+      window.alert(
+        `Zaimportowano lekcje, ale brakuje plikow: ${missingAssets.join(
+          ', ',
+        )}.`,
+      )
+    } else {
+      window.alert('Lekcja zostala zaimportowana.')
+    }
+  }
+
   const handleTeacherLogin = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (teacherLogin === 'topgun' && teacherPassword === 'topgunpass') {
@@ -2274,6 +2623,14 @@ function App() {
             type="button"
           >
             Edytuj lekcję
+          </button>
+          <button
+            className="ghost"
+            onClick={handleExportLesson}
+            disabled={!activeLesson || !activeTopic}
+            type="button"
+          >
+            Eksportuj lekcję
           </button>
           <button
             className="ghost"
@@ -2382,6 +2739,9 @@ function App() {
           <div className="progress-chip">
             Ukończono {completedCount}/{totalLessons}
           </div>
+          <button className="ghost" type="button" onClick={handleImportLesson}>
+            Importuj lekcję
+          </button>
           {teacherMode ? (
             <button className="secondary" onClick={handleTeacherLogout}>
               Wyloguj nauczyciela
