@@ -55,7 +55,7 @@ type ImageItem = {
   size?: number
 }
 
-type LessonComponent =
+type ContentComponent =
   | {
       id: string
       type: 'text'
@@ -79,13 +79,42 @@ type LessonComponent =
       span: ColumnSpan
       images: ImageItem[]
     }
-  | {
-      id: string
-      type: 'download'
-      span: ColumnSpan
-      label: string
-      files: DownloadFile[]
-    }
+
+type DownloadComponent = {
+  id: string
+  type: 'download'
+  span: ColumnSpan
+  label: string
+  files: DownloadFile[]
+}
+
+type TestOption = {
+  id: string
+  text: string
+  isCorrect: boolean
+}
+
+type QuestionRow = {
+  id: string
+  columns: ContentComponent[]
+}
+
+type TestQuestion = {
+  id: string
+  prompt: string
+  rows: QuestionRow[]
+  options: TestOption[]
+}
+
+type TestComponent = {
+  id: string
+  type: 'test'
+  span: ColumnSpan
+  title: string
+  questions: TestQuestion[]
+}
+
+type LessonComponent = ContentComponent | DownloadComponent | TestComponent
 
 type LessonRow = {
   id: string
@@ -121,6 +150,19 @@ type LightboxImage = ImageItem
 type DownloadFile =
   | { kind: 'text'; name: string; content: string }
   | { kind: 'asset'; id: string; name: string; size?: number }
+
+type TestProgress = {
+  questionOrder: string[]
+  optionOrder: Record<string, string[]>
+  currentIndex: number
+  answers: Record<string, string[]>
+}
+
+type TestResult = {
+  completedAt: string
+  score: number
+  total: number
+}
 
 type AssetFile = { id: string; name: string; size?: number }
 type ImageAssetForm = AssetFile & { alt: string; caption: string }
@@ -206,6 +248,18 @@ type LessonFormState = {
   summary: string
 }
 
+type ContentComponentFormState = {
+  type: ContentComponent['type']
+  span: ColumnSpan
+  markdown: string
+  title: string
+  description: string
+  embedUrl: string
+  imagesText: string
+  imageAssets: ImageAssetForm[]
+  videoAsset: AssetFile | null
+}
+
 type ComponentFormState = {
   type: LessonComponent['type']
   span: ColumnSpan
@@ -219,6 +273,8 @@ type ComponentFormState = {
   assetFiles: AssetFile[]
   imageAssets: ImageAssetForm[]
   videoAsset: AssetFile | null
+  testTitle: string
+  testQuestions: TestQuestion[]
 }
 
 const seedTopics: Topic[] = [
@@ -580,8 +636,127 @@ const createId = (prefix: string) => {
   return `${prefix}-${suffix}`
 }
 
-const rowSpanUsed = (row: LessonRow) =>
+const OPTION_LABELS = ['A', 'B', 'C', 'D', 'E', 'F']
+
+const rowSpanUsed = (row: { columns: Array<{ span: ColumnSpan }> }) =>
   row.columns.reduce((sum, column) => sum + column.span, 0)
+
+const createTestOption = (): TestOption => ({
+  id: createId('opt'),
+  text: '',
+  isCorrect: false,
+})
+
+const createTestQuestion = (): TestQuestion => ({
+  id: createId('question'),
+  prompt: 'Nowe pytanie',
+  rows: [
+    {
+      id: createId('qrow'),
+      columns: [
+        {
+          id: createId('qcmp'),
+          type: 'text',
+          span: 4,
+          markdown: 'Dodaj tresc pytania.',
+        },
+      ],
+    },
+  ],
+  options: [
+    { ...createTestOption(), isCorrect: true, text: 'Odpowiedz A' },
+    { ...createTestOption(), text: 'Odpowiedz B' },
+    { ...createTestOption(), text: 'Odpowiedz C' },
+    { ...createTestOption(), text: 'Odpowiedz D' },
+  ],
+})
+
+const ensureOptionCount = (options: TestOption[], count: number) => {
+  const next = [...options]
+  while (next.length < count) {
+    next.push(createTestOption())
+  }
+  return next.slice(0, count)
+}
+
+const createEmptyContentForm = (): ContentComponentFormState => ({
+  type: 'text',
+  span: 4,
+  markdown: '### Nowy blok\nUzupełnij treść.',
+  title: '',
+  description: '',
+  embedUrl: '',
+  imagesText: '',
+  imageAssets: [],
+  videoAsset: null,
+})
+
+const validateTestQuestions = (questions: TestQuestion[]) => {
+  if (!questions.length) {
+    return 'Dodaj przynajmniej jedno pytanie.'
+  }
+  for (const question of questions) {
+    if (!question.prompt.trim()) {
+      return 'Uzupelnij tresc pytania.'
+    }
+    if (question.options.length < 2) {
+      return 'Kazde pytanie musi miec co najmniej 2 odpowiedzi.'
+    }
+    if (!question.options.some((option) => option.isCorrect)) {
+      return 'Kazde pytanie musi miec przynajmniej jedna poprawna odpowiedz.'
+    }
+    if (question.options.some((option) => !option.text.trim())) {
+      return 'Uzupelnij tresc odpowiedzi w pytaniach.'
+    }
+  }
+  return null
+}
+
+const buildTestProgress = (test: TestComponent): TestProgress => {
+  const questionOrder = shuffleArray(test.questions.map((question) => question.id))
+  const optionOrder: Record<string, string[]> = {}
+  test.questions.forEach((question) => {
+    optionOrder[question.id] = shuffleArray(
+      question.options.map((option) => option.id),
+    )
+  })
+  return {
+    questionOrder,
+    optionOrder,
+    currentIndex: 0,
+    answers: {},
+  }
+}
+
+const calculateTestScore = (
+  test: TestComponent,
+  answers: Record<string, string[]>,
+) => {
+  let score = 0
+  test.questions.forEach((question) => {
+    const correctIds = question.options
+      .filter((option) => option.isCorrect)
+      .map((option) => option.id)
+      .sort()
+    const selected = [...(answers[question.id] ?? [])].sort()
+    const isCorrect =
+      correctIds.length === selected.length &&
+      correctIds.every((id, index) => id === selected[index])
+    if (isCorrect) {
+      score += 1
+    }
+  })
+  return score
+}
+
+const shuffleArray = <T,>(items: T[]) => {
+  const result = [...items]
+  for (let i = result.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[result[i], result[j]] = [result[j], result[i]]
+  }
+  return result
+}
 
 const addComponentToRows = (
   rows: LessonRow[],
@@ -630,6 +805,61 @@ const updateComponentInRows = (
   rows: LessonRow[],
   componentId: string,
   nextComponent: LessonComponent,
+) =>
+  rows.map((row) => ({
+    ...row,
+    columns: row.columns.map((column) =>
+      column.id === componentId ? nextComponent : column,
+    ),
+  }))
+
+const addComponentToQuestionRows = (
+  rows: QuestionRow[],
+  component: ContentComponent,
+) => {
+  if (!rows.length) {
+    return [
+      {
+        id: createId('qrow'),
+        columns: [component],
+      },
+    ]
+  }
+  const lastRow = rows[rows.length - 1]
+  const used = rowSpanUsed(lastRow)
+  if (used + component.span > 4) {
+    return [
+      ...rows,
+      {
+        id: createId('qrow'),
+        columns: [component],
+      },
+    ]
+  }
+  return [
+    ...rows.slice(0, -1),
+    {
+      ...lastRow,
+      columns: [...lastRow.columns, component],
+    },
+  ]
+}
+
+const removeQuestionComponentFromRows = (
+  rows: QuestionRow[],
+  componentId: string,
+) =>
+  rows
+    .map((row) => ({
+      ...row,
+      columns: row.columns.filter((column) => column.id !== componentId),
+    }))
+    .filter((row) => row.columns.length > 0)
+
+const updateQuestionComponentInRows = (
+  rows: QuestionRow[],
+  componentId: string,
+  nextComponent: ContentComponent,
 ) =>
   rows.map((row) => ({
     ...row,
@@ -916,6 +1146,136 @@ const createPlaceholderRow = (): LessonRow => ({
   ],
 })
 
+const createQuestionPlaceholderRow = (): QuestionRow => ({
+  id: createId('qrow'),
+  columns: [
+    {
+      id: createId('qcmp'),
+      type: 'text',
+      span: 4,
+      markdown: 'Dodaj tresc pytania.',
+    },
+  ],
+})
+
+const buildContentComponentFromForm = (
+  form: ContentComponentFormState,
+  existingId?: string,
+): ContentComponent => {
+  const base = {
+    id: existingId ?? createId('qcmp'),
+    span: form.span,
+  }
+
+  if (form.type === 'text') {
+    return {
+      ...base,
+      type: 'text',
+      markdown: form.markdown.trim() || 'Nowy blok',
+    }
+  }
+
+  if (form.type === 'video') {
+    const videoAsset = form.videoAsset
+      ? {
+          assetId: form.videoAsset.id,
+          assetName: form.videoAsset.name,
+          assetSize: form.videoAsset.size,
+        }
+      : {}
+    return {
+      ...base,
+      type: 'video',
+      title: form.title.trim() || 'Nowe wideo',
+      description: form.description.trim() || undefined,
+      embedUrl: form.embedUrl.trim() || undefined,
+      ...videoAsset,
+    }
+  }
+
+  const images = parseImageLines(form.imagesText)
+  const assetImages: ImageItem[] = form.imageAssets.map((asset) => ({
+    src: `asset:${asset.id}`,
+    alt: asset.alt.trim() || asset.name,
+    caption: asset.caption.trim() || undefined,
+    name: asset.name,
+    size: asset.size,
+  }))
+  return {
+    ...base,
+    type: 'image',
+    images:
+      images.length || assetImages.length
+        ? [...images, ...assetImages]
+        : [
+            {
+              src: '/system-map.svg',
+              alt: 'Obraz',
+              caption: 'Dodaj opis',
+            },
+          ],
+  }
+}
+
+const buildContentFormFromComponent = (
+  component: ContentComponent,
+): ContentComponentFormState => {
+  if (component.type === 'text') {
+    return {
+      type: 'text',
+      span: component.span,
+      markdown: component.markdown,
+      title: '',
+      description: '',
+      embedUrl: '',
+      imagesText: '',
+      imageAssets: [],
+      videoAsset: null,
+    }
+  }
+  if (component.type === 'video') {
+    const videoAsset = component.assetId
+      ? {
+          id: component.assetId,
+          name: component.assetName ?? 'Wideo',
+          size: component.assetSize,
+        }
+      : null
+    return {
+      type: 'video',
+      span: component.span,
+      markdown: '',
+      title: component.title,
+      description: component.description ?? '',
+      embedUrl: component.embedUrl ?? '',
+      imagesText: '',
+      imageAssets: [],
+      videoAsset,
+    }
+  }
+  const assetImages = component.images
+    .filter((image) => isAssetSrc(image.src))
+    .map((image) => ({
+      id: assetIdFromSrc(image.src),
+      name: image.name ?? image.alt,
+      size: image.size,
+      alt: image.alt,
+      caption: image.caption ?? '',
+    }))
+  const urlImages = component.images.filter((image) => !isAssetSrc(image.src))
+  return {
+    type: 'image',
+    span: component.span,
+    markdown: '',
+    title: '',
+    description: '',
+    embedUrl: '',
+    imagesText: formatImageLines(urlImages),
+    imageAssets: assetImages,
+    videoAsset: null,
+  }
+}
+
 const buildComponentFromForm = (
   form: ComponentFormState,
   existingId?: string,
@@ -973,6 +1333,17 @@ const buildComponentFromForm = (
                 caption: 'Dodaj opis',
               },
             ],
+    }
+  }
+
+  if (form.type === 'test') {
+    return {
+      ...base,
+      type: 'test',
+      title: form.testTitle.trim() || 'Test',
+      questions: form.testQuestions.length
+        ? form.testQuestions
+        : [createTestQuestion()],
     }
   }
 
@@ -1057,7 +1428,7 @@ const createBadge = async (
   ctx.font = '600 48px "Space Grotesk", "Segoe UI", sans-serif'
   ctx.fillText('TopGun Academy', 130, 180)
 
-  ctx.fillStyle = '#f5b97a'
+  ctx.fillStyle = '#8bbcf5'
   ctx.font = '700 36px "Space Grotesk", "Segoe UI", sans-serif'
   ctx.fillText('Ukończono', 130, 250)
 
@@ -1067,7 +1438,57 @@ const createBadge = async (
   ctx.fillText(`Lekcja: ${lessonTitle}`, 130, 370)
   ctx.fillText(`Data: ${formatDateTime(new Date())}`, 130, 420)
 
-  ctx.strokeStyle = '#f5b97a'
+  ctx.strokeStyle = '#8bbcf5'
+  ctx.lineWidth = 6
+  ctx.strokeRect(100, 120, canvas.width - 200, canvas.height - 240)
+
+  const dataUrl = canvas.toDataURL('image/png')
+  const blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob((created) => resolve(created), 'image/png'),
+  )
+
+  return { dataUrl, blob }
+}
+
+const createTestBadge = async (
+  studentName: string,
+  testTitle: string,
+  score: number,
+  total: number,
+): Promise<{ dataUrl: string; blob: Blob | null }> => {
+  const canvas = document.createElement('canvas')
+  canvas.width = 1200
+  canvas.height = 700
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    return { dataUrl: '', blob: null }
+  }
+
+  const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height)
+  gradient.addColorStop(0, '#121927')
+  gradient.addColorStop(1, '#234051')
+  ctx.fillStyle = gradient
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.08)'
+  ctx.fillRect(80, 90, canvas.width - 160, canvas.height - 180)
+
+  ctx.fillStyle = '#f6efe4'
+  ctx.font = '600 48px "Space Grotesk", "Segoe UI", sans-serif'
+  ctx.fillText('TopGun Academy', 130, 180)
+
+  ctx.fillStyle = '#8bbcf5'
+  ctx.font = '700 36px "Space Grotesk", "Segoe UI", sans-serif'
+  ctx.fillText('Test zakonczony', 130, 250)
+
+  ctx.fillStyle = '#f8f1e8'
+  ctx.font = '500 30px "IBM Plex Sans", "Segoe UI", sans-serif'
+  ctx.fillText(`Uczen: ${studentName}`, 130, 320)
+  ctx.fillText(`Test: ${testTitle}`, 130, 370)
+  ctx.fillText(`Wynik: ${score}/${total}`, 130, 420)
+  ctx.fillText(`Data: ${formatDateTime(new Date())}`, 130, 470)
+
+  ctx.strokeStyle = '#8bbcf5'
   ctx.lineWidth = 6
   ctx.strokeRect(100, 120, canvas.width - 200, canvas.height - 240)
 
@@ -1131,6 +1552,28 @@ const buildLessonSearchText = (lesson: Lesson) => {
         const files = Array.isArray(column.files) ? column.files : []
         files.forEach((file) => parts.push(file.name))
       }
+      if (column.type === 'test') {
+        parts.push(column.title)
+        column.questions.forEach((question) => {
+          parts.push(question.prompt)
+          question.rows.forEach((row) => {
+            row.columns.forEach((block) => {
+              if (block.type === 'text') {
+                parts.push(block.markdown)
+              }
+              if (block.type === 'video') {
+                parts.push(block.title, block.description ?? '')
+              }
+              if (block.type === 'image') {
+                block.images.forEach((image) =>
+                  parts.push(image.alt, image.caption ?? ''),
+                )
+              }
+            })
+          })
+          question.options.forEach((option) => parts.push(option.text))
+        })
+      }
     })
   })
   return normalizeText(parts.join(' '))
@@ -1157,10 +1600,34 @@ const collectLessonAssetIds = (lesson: Lesson) => {
           }
         })
       }
+      if (column.type === 'test') {
+        column.questions.forEach((question) => {
+          question.rows.forEach((row) => {
+            row.columns.forEach((block) => {
+              if (block.type === 'image') {
+                block.images.forEach((image) => {
+                  if (isAssetSrc(image.src)) {
+                    assets.add(assetIdFromSrc(image.src))
+                  }
+                })
+              }
+              if (block.type === 'video' && block.assetId) {
+                assets.add(block.assetId)
+              }
+            })
+          })
+        })
+      }
     })
   })
   return assets
 }
+
+const collectTestIds = (lesson: Lesson) =>
+  lesson.rows
+    .flatMap((row) => row.columns)
+    .filter((column): column is TestComponent => column.type === 'test')
+    .map((test) => test.id)
 
 const remapLessonForImport = (
   lesson: Lesson,
@@ -1171,6 +1638,46 @@ const remapLessonForImport = (
   const mapAssetSize = (id?: string) =>
     id ? assetSizeMap[id] ?? undefined : undefined
 
+  const remapContentComponent = (block: ContentComponent): ContentComponent | null => {
+    if (block.type === 'text') {
+      return { ...block, id: createId('component') }
+    }
+    if (block.type === 'video') {
+      const mappedId = mapAssetId(block.assetId)
+      return {
+        ...block,
+        id: createId('component'),
+        assetId: mappedId,
+        assetName: mappedId ? block.assetName : undefined,
+        assetSize: mapAssetSize(mappedId),
+      }
+    }
+    const images = block.images
+      .map((image): ImageItem | null => {
+        if (!isAssetSrc(image.src)) {
+          return image
+        }
+        const originalId = assetIdFromSrc(image.src)
+        const mappedId = mapAssetId(originalId)
+        if (!mappedId) {
+          return null
+        }
+        const size = mapAssetSize(mappedId) ?? image.size
+        const nextImage: ImageItem = {
+          ...image,
+          src: `asset:${mappedId}`,
+        }
+        if (typeof size === 'number') {
+          nextImage.size = size
+        } else {
+          delete nextImage.size
+        }
+        return nextImage
+      })
+      .filter(isDefined)
+    return { ...block, id: createId('component'), images }
+  }
+
   return {
     ...lesson,
     id: createId('lesson'),
@@ -1178,47 +1685,29 @@ const remapLessonForImport = (
       ...row,
       id: createId('row'),
       columns: row.columns.map((column) => {
-        if (column.type === 'text') {
-          return { ...column, id: createId('component') }
+        if (column.type === 'text' || column.type === 'video' || column.type === 'image') {
+          return remapContentComponent(column) ?? { ...column, id: createId('component') }
         }
-        if (column.type === 'video') {
-          const mappedId = mapAssetId(column.assetId)
+        if (column.type === 'test') {
+          const questions = column.questions.map((question) => ({
+            ...question,
+            id: createId('question'),
+            rows: question.rows.map((rowItem) => ({
+              ...rowItem,
+              id: createId('qrow'),
+              columns: rowItem.columns
+                .map((block) => remapContentComponent(block))
+                .filter(isDefined),
+            })),
+            options: question.options.map((option) => ({
+              ...option,
+              id: createId('opt'),
+            })),
+          }))
           return {
             ...column,
             id: createId('component'),
-            assetId: mappedId,
-            assetName: mappedId ? column.assetName : undefined,
-            assetSize: mapAssetSize(mappedId),
-          }
-        }
-        if (column.type === 'image') {
-          const images = column.images
-            .map((image): ImageItem | null => {
-              if (!isAssetSrc(image.src)) {
-                return image
-              }
-              const originalId = assetIdFromSrc(image.src)
-              const mappedId = mapAssetId(originalId)
-              if (!mappedId) {
-                return null
-              }
-              const size = mapAssetSize(mappedId) ?? image.size
-              const nextImage: ImageItem = {
-                ...image,
-                src: `asset:${mappedId}`,
-              }
-              if (typeof size === 'number') {
-                nextImage.size = size
-              } else {
-                delete nextImage.size
-              }
-              return nextImage
-            })
-            .filter(isDefined)
-          return {
-            ...column,
-            id: createId('component'),
-            images,
+            questions,
           }
         }
         const files = column.files
@@ -1356,8 +1845,26 @@ function App() {
     assetFiles: [],
     imageAssets: [],
     videoAsset: null,
+    testTitle: '',
+    testQuestions: [],
   })
   const [badgePreview, setBadgePreview] = useState<Record<string, string>>({})
+  const [testBadgePreview, setTestBadgePreview] = useState<
+    Record<string, string>
+  >({})
+  const [testProgress, setTestProgress] = useLocalStorageState<
+    Record<string, TestProgress>
+  >('tga-test-progress', {})
+  const [testResults, setTestResults] = useLocalStorageState<
+    Record<string, TestResult>
+  >('tga-test-results', {})
+  const [activeTestId, setActiveTestId] = useState<string | null>(null)
+  const [showCorrectAnswers, setShowCorrectAnswers] = useState(false)
+  const [activeQuestionId, setActiveQuestionId] = useState<string | null>(null)
+  const [editingQuestionComponentId, setEditingQuestionComponentId] =
+    useState<string | null>(null)
+  const [questionComponentForm, setQuestionComponentForm] =
+    useState<ContentComponentFormState>(createEmptyContentForm())
   const [lightboxImage, setLightboxImage] = useState<LightboxImage | null>(null)
 
   const normalizedSearch = normalizeText(searchValue.trim())
@@ -1368,6 +1875,22 @@ function App() {
   const activeTopic = topics.find((topic) =>
     topic.lessons.some((lesson) => lesson.id === activeLesson?.id),
   )
+  const activeTestComponent = activeTestId
+    ? topics
+        .flatMap((topic) => topic.lessons)
+        .flatMap((lesson) => lesson.rows)
+        .flatMap((row) => row.columns)
+        .find(
+          (column): column is TestComponent =>
+            column.type === 'test' && column.id === activeTestId,
+        ) ?? null
+    : null
+  const activeTestProgress = activeTestComponent
+    ? testProgress[activeTestComponent.id]
+    : undefined
+  const activeTestResult = activeTestComponent
+    ? testResults[activeTestComponent.id]
+    : undefined
 
   useEffect(() => {
     const normalized = normalizeTopics(topics)
@@ -1385,6 +1908,12 @@ function App() {
     }
     setActiveLessonId(allLessons[0]?.id ?? '')
   }, [activeLessonId, allLessons])
+
+  useEffect(() => {
+    if (activeTestId && !activeTestComponent) {
+      setActiveTestId(null)
+    }
+  }, [activeTestId, activeTestComponent])
 
   const filteredTopics = useMemo(() => {
     if (!normalizedSearch) {
@@ -1470,6 +1999,171 @@ function App() {
     })
   }
 
+  const ensureTestProgress = (test: TestComponent) => {
+    const existing = testProgress[test.id]
+    if (!existing) {
+      return buildTestProgress(test)
+    }
+    const questionIds = test.questions.map((question) => question.id)
+    const orderMismatch =
+      existing.questionOrder.length !== questionIds.length ||
+      existing.questionOrder.some((id) => !questionIds.includes(id)) ||
+      questionIds.some((id) => !existing.questionOrder.includes(id))
+    if (orderMismatch) {
+      return buildTestProgress(test)
+    }
+    const nextOptionOrder: Record<string, string[]> = {}
+    const nextAnswers: Record<string, string[]> = {}
+    test.questions.forEach((question) => {
+      const optionIds = question.options.map((option) => option.id)
+      const currentOrder = existing.optionOrder[question.id] ?? []
+      const optionMismatch =
+        currentOrder.length !== optionIds.length ||
+        currentOrder.some((id) => !optionIds.includes(id))
+      nextOptionOrder[question.id] = optionMismatch
+        ? shuffleArray(optionIds)
+        : currentOrder
+      const selected = existing.answers[question.id] ?? []
+      nextAnswers[question.id] = selected.filter((id) =>
+        optionIds.includes(id),
+      )
+    })
+    return {
+      ...existing,
+      questionOrder: existing.questionOrder,
+      optionOrder: nextOptionOrder,
+      answers: nextAnswers,
+      currentIndex: Math.min(
+        existing.currentIndex,
+        Math.max(0, questionIds.length - 1),
+      ),
+    }
+  }
+
+  const handleStartTest = (test: TestComponent) => {
+    const nextProgress = ensureTestProgress(test)
+    setTestProgress((current) => ({
+      ...current,
+      [test.id]: nextProgress,
+    }))
+    setActiveTestId(test.id)
+    setShowCorrectAnswers(false)
+  }
+
+  const handleViewTestResult = (testId: string) => {
+    setActiveTestId(testId)
+    setShowCorrectAnswers(false)
+  }
+
+  const handleCloseTest = () => {
+    setActiveTestId(null)
+    setShowCorrectAnswers(false)
+  }
+
+  const handleResetTest = (testId: string) => {
+    setTestProgress((current) => {
+      const next = { ...current }
+      delete next[testId]
+      return next
+    })
+    setTestResults((current) => {
+      const next = { ...current }
+      delete next[testId]
+      return next
+    })
+    setTestBadgePreview((previous) => {
+      const next = { ...previous }
+      delete next[testId]
+      return next
+    })
+  }
+
+  const handleTestAnswerToggle = (
+    testId: string,
+    questionId: string,
+    optionId: string,
+  ) => {
+    setTestProgress((current) => {
+      const progress = current[testId]
+      if (!progress) {
+        return current
+      }
+      const selected = new Set(progress.answers[questionId] ?? [])
+      if (selected.has(optionId)) {
+        selected.delete(optionId)
+      } else {
+        selected.add(optionId)
+      }
+      return {
+        ...current,
+        [testId]: {
+          ...progress,
+          answers: {
+            ...progress.answers,
+            [questionId]: Array.from(selected),
+          },
+        },
+      }
+    })
+  }
+
+  const handleTestNavigation = (testId: string, direction: 'next' | 'prev') => {
+    setTestProgress((current) => {
+      const progress = current[testId]
+      if (!progress) {
+        return current
+      }
+      const delta = direction === 'next' ? 1 : -1
+      const nextIndex = Math.max(
+        0,
+        Math.min(progress.currentIndex + delta, progress.questionOrder.length - 1),
+      )
+      return {
+        ...current,
+        [testId]: {
+          ...progress,
+          currentIndex: nextIndex,
+        },
+      }
+    })
+  }
+
+  const handleFinishTest = async (test: TestComponent) => {
+    const progress = testProgress[test.id]
+    if (!progress) {
+      return
+    }
+    const score = calculateTestScore(test, progress.answers)
+    const total = test.questions.length
+    setTestResults((current) => ({
+      ...current,
+      [test.id]: {
+        completedAt: new Date().toISOString(),
+        score,
+        total,
+      },
+    }))
+    setTestProgress((current) => {
+      const next = { ...current }
+      delete next[test.id]
+      return next
+    })
+    const badge = await createTestBadge(studentName, test.title, score, total)
+    if (badge.dataUrl) {
+      setTestBadgePreview((previous) => ({
+        ...previous,
+        [test.id]: badge.dataUrl,
+      }))
+    }
+    if (badge.blob) {
+      const safeStudent = studentName.trim() || 'Uczen'
+      await downloadBlob(
+        badge.blob,
+        `${slugify(safeStudent)}_${slugify(test.title)}.png`,
+      )
+    }
+  }
+
   const openAddTopic = () => {
     setIsModalExpanded(false)
     setTopicForm({ title: '', description: '' })
@@ -1519,6 +2213,14 @@ function App() {
   const openAddComponent = (lessonId: string) => {
     setIsModalExpanded(false)
     setTextEditorMode('rich')
+    cancelQuestionComponentEdit()
+    const lessonTitle =
+      topics
+        .flatMap((topic) => topic.lessons)
+        .find((lesson) => lesson.id === lessonId)?.title ?? ''
+    const defaultTestTitle = lessonTitle
+      ? `Test: ${lessonTitle}`
+      : 'Test'
     setComponentForm({
       type: 'text',
       span: 4,
@@ -1532,12 +2234,15 @@ function App() {
       assetFiles: [],
       imageAssets: [],
       videoAsset: null,
+      testTitle: defaultTestTitle,
+      testQuestions: [createTestQuestion()],
     })
     setTeacherModal({ type: 'add-component', lessonId })
   }
 
   const openEditComponent = (lessonId: string, component: LessonComponent) => {
     setIsModalExpanded(false)
+    cancelQuestionComponentEdit()
     if (component.type === 'text') {
       const isHtml = /<\/?[a-z][\s\S]*>/i.test(component.markdown)
       setTextEditorMode(isHtml ? 'rich' : 'markdown')
@@ -1554,6 +2259,8 @@ function App() {
         assetFiles: [],
         imageAssets: [],
         videoAsset: null,
+        testTitle: '',
+        testQuestions: [],
       })
     }
     if (component.type === 'video') {
@@ -1577,6 +2284,8 @@ function App() {
         assetFiles: [],
         imageAssets: [],
         videoAsset,
+        testTitle: '',
+        testQuestions: [],
       })
     }
     if (component.type === 'image') {
@@ -1605,6 +2314,8 @@ function App() {
         assetFiles: [],
         imageAssets: assetImages,
         videoAsset: null,
+        testTitle: '',
+        testQuestions: [],
       })
     }
     if (component.type === 'download') {
@@ -1631,6 +2342,26 @@ function App() {
         assetFiles,
         imageAssets: [],
         videoAsset: null,
+        testTitle: '',
+        testQuestions: [],
+      })
+    }
+    if (component.type === 'test') {
+      setComponentForm({
+        type: 'test',
+        span: component.span,
+        markdown: '',
+        title: '',
+        description: '',
+        embedUrl: '',
+        imagesText: '',
+        downloadLabel: 'Materiały do pobrania',
+        filesText: '',
+        assetFiles: [],
+        imageAssets: [],
+        videoAsset: null,
+        testTitle: component.title,
+        testQuestions: component.questions,
       })
     }
     setTeacherModal({
@@ -1685,6 +2416,9 @@ function App() {
       return
     }
     const removedLessonIds = topic.lessons.map((lesson) => lesson.id)
+    const removedTestIds = topic.lessons.flatMap((lesson) =>
+      collectTestIds(lesson),
+    )
     const nextTopics = topics.filter((item) => item.id !== topicId)
     setTopics(nextTopics)
     setCompletedLessons((current) =>
@@ -1697,6 +2431,23 @@ function App() {
       })
       return next
     })
+    if (removedTestIds.length) {
+      setTestProgress((current) => {
+        const next = { ...current }
+        removedTestIds.forEach((id) => delete next[id])
+        return next
+      })
+      setTestResults((current) => {
+        const next = { ...current }
+        removedTestIds.forEach((id) => delete next[id])
+        return next
+      })
+      setTestBadgePreview((previous) => {
+        const next = { ...previous }
+        removedTestIds.forEach((id) => delete next[id])
+        return next
+      })
+    }
     if (removedLessonIds.includes(activeLessonId)) {
       const nextLessonId =
         nextTopics.flatMap((topicItem) => topicItem.lessons)[0]?.id ?? ''
@@ -1762,6 +2513,10 @@ function App() {
     if (!confirmed) {
       return
     }
+    const lessonToDelete = topics
+      .flatMap((topic) => topic.lessons)
+      .find((lesson) => lesson.id === lessonId)
+    const testIds = lessonToDelete ? collectTestIds(lessonToDelete) : []
     const nextTopics = topics.map((topic) => ({
       ...topic,
       lessons: topic.lessons.filter((lesson) => lesson.id !== lessonId),
@@ -1775,6 +2530,23 @@ function App() {
       delete next[lessonId]
       return next
     })
+    if (testIds.length) {
+      setTestProgress((current) => {
+        const next = { ...current }
+        testIds.forEach((id) => delete next[id])
+        return next
+      })
+      setTestResults((current) => {
+        const next = { ...current }
+        testIds.forEach((id) => delete next[id])
+        return next
+      })
+      setTestBadgePreview((previous) => {
+        const next = { ...previous }
+        testIds.forEach((id) => delete next[id])
+        return next
+      })
+    }
     if (activeLessonId === lessonId) {
       const nextLessonId =
         nextTopics.flatMap((topicItem) => topicItem.lessons)[0]?.id ?? ''
@@ -1786,6 +2558,13 @@ function App() {
     event.preventDefault()
     if (!teacherModal) {
       return
+    }
+    if (componentForm.type === 'test') {
+      const validationError = validateTestQuestions(componentForm.testQuestions)
+      if (validationError) {
+        window.alert(validationError)
+        return
+      }
     }
     const markdownOverride =
       componentForm.type === 'text' && textEditorMode === 'rich'
@@ -1837,6 +2616,28 @@ function App() {
     if (!confirmed) {
       return
     }
+    const componentToDelete = topics
+      .flatMap((topic) => topic.lessons)
+      .find((lesson) => lesson.id === lessonId)
+      ?.rows.flatMap((row) => row.columns)
+      .find((column) => column.id === componentId)
+    if (componentToDelete?.type === 'test') {
+      setTestProgress((current) => {
+        const next = { ...current }
+        delete next[componentToDelete.id]
+        return next
+      })
+      setTestResults((current) => {
+        const next = { ...current }
+        delete next[componentToDelete.id]
+        return next
+      })
+      setTestBadgePreview((previous) => {
+        const next = { ...previous }
+        delete next[componentToDelete.id]
+        return next
+      })
+    }
     setTopics((current) =>
       current.map((topic) => ({
         ...topic,
@@ -1868,6 +2669,124 @@ function App() {
         ),
       })),
     )
+  }
+
+  const updateTestQuestions = (
+    updater: (current: TestQuestion[]) => TestQuestion[],
+  ) => {
+    setComponentForm((current) =>
+      current.type === 'test'
+        ? {
+            ...current,
+            testQuestions: updater(current.testQuestions),
+          }
+        : current,
+    )
+  }
+
+  const updateTestQuestion = (
+    questionId: string,
+    updater: (question: TestQuestion) => TestQuestion,
+  ) => {
+    updateTestQuestions((questions) =>
+      questions.map((question) =>
+        question.id === questionId ? updater(question) : question,
+      ),
+    )
+  }
+
+  const handleAddTestQuestion = () => {
+    updateTestQuestions((questions) => [...questions, createTestQuestion()])
+  }
+
+  const handleRemoveTestQuestion = (questionId: string) => {
+    updateTestQuestions((questions) =>
+      questions.filter((question) => question.id !== questionId),
+    )
+  }
+
+  const handleQuestionOptionCountChange = (
+    questionId: string,
+    nextCount: number,
+  ) => {
+    updateTestQuestion(questionId, (question) => {
+      const nextOptions = ensureOptionCount(question.options, nextCount)
+      const hasCorrect = nextOptions.some((option) => option.isCorrect)
+      if (!hasCorrect && nextOptions.length) {
+        nextOptions[0].isCorrect = true
+      }
+      return { ...question, options: nextOptions }
+    })
+  }
+
+  const handleQuestionOptionToggle = (
+    questionId: string,
+    optionId: string,
+  ) => {
+    updateTestQuestion(questionId, (question) => {
+      const nextOptions = question.options.map((option) =>
+        option.id === optionId
+          ? { ...option, isCorrect: !option.isCorrect }
+          : option,
+      )
+      const hasCorrect = nextOptions.some((option) => option.isCorrect)
+      if (!hasCorrect) {
+        return question
+      }
+      return { ...question, options: nextOptions }
+    })
+  }
+
+  const startQuestionComponentEdit = (
+    questionId: string,
+    component?: ContentComponent,
+  ) => {
+    setActiveQuestionId(questionId)
+    setEditingQuestionComponentId(component?.id ?? null)
+    setQuestionComponentForm(
+      component ? buildContentFormFromComponent(component) : createEmptyContentForm(),
+    )
+  }
+
+  const cancelQuestionComponentEdit = () => {
+    setActiveQuestionId(null)
+    setEditingQuestionComponentId(null)
+    setQuestionComponentForm(createEmptyContentForm())
+  }
+
+  const handleSaveQuestionComponent = (questionId: string) => {
+    const component = buildContentComponentFromForm(
+      questionComponentForm,
+      editingQuestionComponentId ?? undefined,
+    )
+    updateTestQuestion(questionId, (question) => {
+      const nextRows = editingQuestionComponentId
+        ? updateQuestionComponentInRows(
+            question.rows,
+            editingQuestionComponentId,
+            component,
+          )
+        : addComponentToQuestionRows(question.rows, component)
+      return { ...question, rows: nextRows }
+    })
+    cancelQuestionComponentEdit()
+  }
+
+  const handleRemoveQuestionComponent = (
+    questionId: string,
+    componentId: string,
+  ) => {
+    updateTestQuestion(questionId, (question) => ({
+      ...question,
+      rows: removeQuestionComponentFromRows(question.rows, componentId),
+    }))
+  }
+
+  const handleAddQuestionRow = (questionId: string) => {
+    updateTestQuestion(questionId, (question) => ({
+      ...question,
+      rows: [...question.rows, createQuestionPlaceholderRow()],
+    }))
   }
 
   const handlePickDownloadAssets = async () => {
@@ -1959,6 +2878,75 @@ function App() {
 
   const handleRemoveVideoAsset = () => {
     setComponentForm((current) => ({
+      ...current,
+      videoAsset: null,
+    }))
+  }
+
+  const handlePickQuestionImageAssets = async () => {
+    const electronApi = getElectronApi()
+    if (!electronApi?.pickFiles) {
+      window.alert(
+        'Dodawanie plikow jest dostepne tylko w aplikacji desktopowej.',
+      )
+      return
+    }
+    const picked = await electronApi.pickFiles({
+      filters: [
+        {
+          name: 'Images',
+          extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'],
+        },
+      ],
+    })
+    if (!picked.length) {
+      return
+    }
+    const mapped: ImageAssetForm[] = picked.map((file) => ({
+      ...file,
+      alt: file.name,
+      caption: '',
+    }))
+    setQuestionComponentForm((current) => ({
+      ...current,
+      imageAssets: [...current.imageAssets, ...mapped],
+    }))
+  }
+
+  const handleRemoveQuestionImageAsset = (assetId: string) => {
+    setQuestionComponentForm((current) => ({
+      ...current,
+      imageAssets: current.imageAssets.filter((file) => file.id !== assetId),
+    }))
+  }
+
+  const handlePickQuestionVideoAsset = async () => {
+    const electronApi = getElectronApi()
+    if (!electronApi?.pickFiles) {
+      window.alert(
+        'Dodawanie plikow jest dostepne tylko w aplikacji desktopowej.',
+      )
+      return
+    }
+    const picked = await electronApi.pickFiles({
+      filters: [
+        {
+          name: 'Video',
+          extensions: ['mp4', 'webm', 'mov', 'm4v', 'ogv'],
+        },
+      ],
+    })
+    if (!picked.length) {
+      return
+    }
+    setQuestionComponentForm((current) => ({
+      ...current,
+      videoAsset: picked[0],
+    }))
+  }
+
+  const handleRemoveQuestionVideoAsset = () => {
+    setQuestionComponentForm((current) => ({
       ...current,
       videoAsset: null,
     }))
@@ -2526,6 +3514,7 @@ function App() {
     )
 
     let replacedLessonId: string | null = null
+    let replacedTestIds: string[] = []
     let nextTopics = [...topics]
 
     if (existingTopicIndex === -1) {
@@ -2540,6 +3529,9 @@ function App() {
       const targetTopic = nextTopics[existingTopicIndex]
       if (existingLessonIndex !== -1) {
         replacedLessonId = targetTopic.lessons[existingLessonIndex].id
+        replacedTestIds = collectTestIds(
+          targetTopic.lessons[existingLessonIndex],
+        )
         const nextLessons = [...targetTopic.lessons]
         nextLessons.splice(existingLessonIndex, 1, importedLesson)
         nextTopics[existingTopicIndex] = {
@@ -2559,6 +3551,23 @@ function App() {
       setCompletedLessons((current) =>
         current.filter((id) => id !== replacedLessonId),
       )
+      if (replacedTestIds.length) {
+        setTestProgress((current) => {
+          const next = { ...current }
+          replacedTestIds.forEach((id) => delete next[id])
+          return next
+        })
+        setTestResults((current) => {
+          const next = { ...current }
+          replacedTestIds.forEach((id) => delete next[id])
+          return next
+        })
+        setTestBadgePreview((previous) => {
+          const next = { ...previous }
+          replacedTestIds.forEach((id) => delete next[id])
+          return next
+        })
+      }
     }
     setActiveLessonId(importedLesson.id)
 
@@ -3084,6 +4093,92 @@ function App() {
                           </div>
                         )
                       }
+                      if (column.type === 'test') {
+                        const progress = testProgress[column.id]
+                        const result = testResults[column.id]
+                        const questionCount = column.questions.length
+                        const answeredCount = progress
+                          ? Object.values(progress.answers).filter(
+                              (answers) => answers.length > 0,
+                            ).length
+                          : 0
+                        return (
+                          <div
+                            key={column.id}
+                            className={`lesson-card span-${column.span}`}
+                          >
+                            {teacherMode && activeLesson && (
+                              <div className="card-toolbar">
+                                <button
+                                  className="ghost small"
+                                  type="button"
+                                  onClick={() =>
+                                    openEditComponent(activeLesson.id, column)
+                                  }
+                                >
+                                  Edytuj
+                                </button>
+                                <button
+                                  className="ghost small"
+                                  type="button"
+                                  onClick={() =>
+                                    handleDeleteComponent(
+                                      activeLesson.id,
+                                      column.id,
+                                    )
+                                  }
+                                >
+                                  Usuń
+                                </button>
+                              </div>
+                            )}
+                            <div className="test-card">
+                              <div>
+                                <h3>{column.title}</h3>
+                                <p>
+                                  Pytan: {questionCount}
+                                  {result
+                                    ? ` • Wynik: ${result.score}/${result.total}`
+                                    : progress
+                                      ? ` • Postep: ${answeredCount}/${questionCount}`
+                                      : ''}
+                                </p>
+                              </div>
+                              <div className="test-actions">
+                                {result ? (
+                                  <>
+                                    <button
+                                      className="ghost"
+                                      type="button"
+                                      onClick={() => handleViewTestResult(column.id)}
+                                    >
+                                      Zobacz wynik
+                                    </button>
+                                    <button
+                                      className="primary"
+                                      type="button"
+                                      onClick={() => {
+                                        handleResetTest(column.id)
+                                        handleStartTest(column)
+                                      }}
+                                    >
+                                      Rozwiaz jeszcze raz
+                                    </button>
+                                  </>
+                                ) : (
+                                  <button
+                                    className="primary"
+                                    type="button"
+                                    onClick={() => handleStartTest(column)}
+                                  >
+                                    {progress ? 'Kontynuuj test' : 'Rozwiaz test'}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      }
                       return null
                     })}
                   </div>
@@ -3370,6 +4465,17 @@ function App() {
                       setComponentForm((current) => ({
                         ...current,
                         type: event.target.value as LessonComponent['type'],
+                        testTitle:
+                          event.target.value === 'test' && !current.testTitle
+                            ? activeLesson
+                              ? `Test: ${activeLesson.title}`
+                              : 'Test'
+                            : current.testTitle,
+                        testQuestions:
+                          event.target.value === 'test' &&
+                          !current.testQuestions.length
+                            ? [createTestQuestion()]
+                            : current.testQuestions,
                       }))
                     }
                   >
@@ -3377,6 +4483,7 @@ function App() {
                     <option value="video">Wideo</option>
                     <option value="image">Obraz</option>
                     <option value="download">Pliki do pobrania</option>
+                    <option value="test">Test</option>
                   </select>
                 </label>
                 <label>
@@ -4070,10 +5177,691 @@ function App() {
                   </>
                 )}
 
+                {componentForm.type === 'test' && (
+                  <>
+                    <label>
+                      Nazwa testu
+                      <input
+                        value={componentForm.testTitle}
+                        onChange={(event) =>
+                          setComponentForm((current) => ({
+                            ...current,
+                            testTitle: event.target.value,
+                          }))
+                        }
+                        placeholder="Test: nazwa lekcji"
+                      />
+                    </label>
+                    <div className="test-editor">
+                      <div className="test-editor-header">
+                        <h4>Pytania</h4>
+                        <button
+                          className="ghost small"
+                          type="button"
+                          onClick={handleAddTestQuestion}
+                        >
+                          Dodaj pytanie
+                        </button>
+                      </div>
+                      {componentForm.testQuestions.length ? (
+                        <div className="test-question-list">
+                          {componentForm.testQuestions.map((question, index) => (
+                            <div className="test-question-card" key={question.id}>
+                              <div className="test-question-head">
+                                <strong>Pytanie {index + 1}</strong>
+                                <button
+                                  className="ghost small"
+                                  type="button"
+                                  onClick={() => handleRemoveTestQuestion(question.id)}
+                                >
+                                  Usuń
+                                </button>
+                              </div>
+                              <label>
+                                Treść pytania
+                                <textarea
+                                  rows={3}
+                                  value={question.prompt}
+                                  onChange={(event) =>
+                                    updateTestQuestion(question.id, (current) => ({
+                                      ...current,
+                                      prompt: event.target.value,
+                                    }))
+                                  }
+                                  placeholder="Wpisz pytanie..."
+                                />
+                              </label>
+                              <div className="question-content">
+                                <div className="question-content-header">
+                                  <span>Materialy pytania</span>
+                                  <div className="question-content-actions">
+                                    <button
+                                      className="ghost small"
+                                      type="button"
+                                      onClick={() => handleAddQuestionRow(question.id)}
+                                    >
+                                      Dodaj row
+                                    </button>
+                                    <button
+                                      className="ghost small"
+                                      type="button"
+                                      onClick={() => startQuestionComponentEdit(question.id)}
+                                    >
+                                      Dodaj blok
+                                    </button>
+                                  </div>
+                                </div>
+                                {question.rows.length ? (
+                                  <div className="question-grid">
+                                    {question.rows.map((row) => (
+                                      <div className="question-row" key={row.id}>
+                                        {row.columns.map((block) => (
+                                          <div
+                                            key={block.id}
+                                            className={`question-block span-${block.span}`}
+                                          >
+                                            <div className="question-block-head">
+                                              <span>
+                                                {block.type === 'text'
+                                                  ? 'Tekst'
+                                                  : block.type === 'image'
+                                                    ? 'Obraz'
+                                                    : 'Wideo'}
+                                              </span>
+                                              <div className="question-block-actions">
+                                                <button
+                                                  className="ghost small"
+                                                  type="button"
+                                                  onClick={() =>
+                                                    startQuestionComponentEdit(
+                                                      question.id,
+                                                      block,
+                                                    )
+                                                  }
+                                                >
+                                                  Edytuj
+                                                </button>
+                                                <button
+                                                  className="ghost small"
+                                                  type="button"
+                                                  onClick={() =>
+                                                    handleRemoveQuestionComponent(
+                                                      question.id,
+                                                      block.id,
+                                                    )
+                                                  }
+                                                >
+                                                  Usuń
+                                                </button>
+                                              </div>
+                                            </div>
+                                            <div className="question-block-preview">
+                                              {block.type === 'text' && (
+                                                <MarkdownBlock markdown={block.markdown} />
+                                              )}
+                                              {block.type === 'image' && block.images[0] && (
+                                                <ResolvedImage
+                                                  src={block.images[0].src}
+                                                  alt={block.images[0].alt}
+                                                  className="question-image-thumb"
+                                                />
+                                              )}
+                                              {block.type === 'video' && (
+                                                <span>{block.title}</span>
+                                              )}
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p>Brak materialow. Dodaj blok tresci.</p>
+                                )}
+                              </div>
+
+                              {activeQuestionId === question.id && (
+                                <div className="question-editor">
+                                  <div className="question-editor-header">
+                                    <strong>
+                                      {editingQuestionComponentId
+                                        ? 'Edytuj blok'
+                                        : 'Dodaj blok'}
+                                    </strong>
+                                    <button
+                                      className="ghost small"
+                                      type="button"
+                                      onClick={cancelQuestionComponentEdit}
+                                    >
+                                      Zamknij
+                                    </button>
+                                  </div>
+                                  <label>
+                                    Typ bloku
+                                    <select
+                                      value={questionComponentForm.type}
+                                      onChange={(event) =>
+                                        setQuestionComponentForm((current) => ({
+                                          ...current,
+                                          type: event.target
+                                            .value as ContentComponent['type'],
+                                        }))
+                                      }
+                                    >
+                                      <option value="text">Tekst</option>
+                                      <option value="image">Obraz</option>
+                                      <option value="video">Wideo</option>
+                                    </select>
+                                  </label>
+                                  <label>
+                                    Szerokość (kolumny)
+                                    <select
+                                      value={questionComponentForm.span}
+                                      onChange={(event) =>
+                                        setQuestionComponentForm((current) => ({
+                                          ...current,
+                                          span: Number(
+                                            event.target.value,
+                                          ) as ColumnSpan,
+                                        }))
+                                      }
+                                    >
+                                      <option value={1}>1 kolumna</option>
+                                      <option value={2}>2 kolumny</option>
+                                      <option value={4}>4 kolumny</option>
+                                    </select>
+                                  </label>
+                                  {questionComponentForm.type === 'text' && (
+                                    <label>
+                                      Tresc (Markdown)
+                                      <textarea
+                                        rows={5}
+                                        value={questionComponentForm.markdown}
+                                        onChange={(event) =>
+                                          setQuestionComponentForm((current) => ({
+                                            ...current,
+                                            markdown: event.target.value,
+                                          }))
+                                        }
+                                      />
+                                    </label>
+                                  )}
+                                  {questionComponentForm.type === 'image' && (
+                                    <>
+                                      <label>
+                                        Linki do obrazow (src | opis | podpis)
+                                        <textarea
+                                          rows={3}
+                                          value={questionComponentForm.imagesText}
+                                          onChange={(event) =>
+                                            setQuestionComponentForm((current) => ({
+                                              ...current,
+                                              imagesText: event.target.value,
+                                            }))
+                                          }
+                                        />
+                                      </label>
+                                      <div className="asset-box">
+                                        <div className="asset-header">
+                                          <span>Obrazy z dysku</span>
+                                          <button
+                                            className="ghost small"
+                                            type="button"
+                                            onClick={handlePickQuestionImageAssets}
+                                          >
+                                            Dodaj obrazy
+                                          </button>
+                                        </div>
+                                        {questionComponentForm.imageAssets.length ? (
+                                          <div className="asset-list">
+                                            {questionComponentForm.imageAssets.map((file) => (
+                                              <div className="asset-item" key={file.id}>
+                                                <div>
+                                                  <strong>{file.name}</strong>
+                                                  {file.size && (
+                                                    <span>
+                                                      {formatFileSize(file.size)}
+                                                    </span>
+                                                  )}
+                                                </div>
+                                                <button
+                                                  className="ghost small"
+                                                  type="button"
+                                                  onClick={() =>
+                                                    handleRemoveQuestionImageAsset(file.id)
+                                                  }
+                                                >
+                                                  Usuń
+                                                </button>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        ) : (
+                                          <p>Brak obrazow.</p>
+                                        )}
+                                      </div>
+                                    </>
+                                  )}
+                                  {questionComponentForm.type === 'video' && (
+                                    <>
+                                      <label>
+                                        Tytul wideo
+                                        <input
+                                          value={questionComponentForm.title}
+                                          onChange={(event) =>
+                                            setQuestionComponentForm((current) => ({
+                                              ...current,
+                                              title: event.target.value,
+                                            }))
+                                          }
+                                        />
+                                      </label>
+                                      <label>
+                                        Opis
+                                        <textarea
+                                          rows={2}
+                                          value={questionComponentForm.description}
+                                          onChange={(event) =>
+                                            setQuestionComponentForm((current) => ({
+                                              ...current,
+                                              description: event.target.value,
+                                            }))
+                                          }
+                                        />
+                                      </label>
+                                      <label>
+                                        Embed URL
+                                        <input
+                                          value={questionComponentForm.embedUrl}
+                                          onChange={(event) =>
+                                            setQuestionComponentForm((current) => ({
+                                              ...current,
+                                              embedUrl: event.target.value,
+                                            }))
+                                          }
+                                          placeholder="https://www.youtube.com/embed/..."
+                                        />
+                                      </label>
+                                      <div className="asset-box">
+                                        <div className="asset-header">
+                                          <span>Wideo z dysku</span>
+                                          <button
+                                            className="ghost small"
+                                            type="button"
+                                            onClick={handlePickQuestionVideoAsset}
+                                          >
+                                            Dodaj wideo
+                                          </button>
+                                        </div>
+                                        {questionComponentForm.videoAsset ? (
+                                          <div className="asset-item">
+                                            <div>
+                                              <strong>
+                                                {questionComponentForm.videoAsset.name}
+                                              </strong>
+                                              {questionComponentForm.videoAsset.size && (
+                                                <span>
+                                                  {formatFileSize(
+                                                    questionComponentForm.videoAsset.size,
+                                                  )}
+                                                </span>
+                                              )}
+                                            </div>
+                                            <button
+                                              className="ghost small"
+                                              type="button"
+                                              onClick={handleRemoveQuestionVideoAsset}
+                                            >
+                                              Usuń
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <p>Brak wideo.</p>
+                                        )}
+                                      </div>
+                                    </>
+                                  )}
+                                  <div className="question-editor-actions">
+                                    <button
+                                      className="ghost small"
+                                      type="button"
+                                      onClick={cancelQuestionComponentEdit}
+                                    >
+                                      Anuluj
+                                    </button>
+                                    <button
+                                      className="primary"
+                                      type="button"
+                                      onClick={() => handleSaveQuestionComponent(question.id)}
+                                    >
+                                      Zapisz blok
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              <div className="question-options">
+                                <label>
+                                  Liczba odpowiedzi
+                                  <select
+                                    value={question.options.length}
+                                    onChange={(event) =>
+                                      handleQuestionOptionCountChange(
+                                        question.id,
+                                        Number(event.target.value),
+                                      )
+                                    }
+                                  >
+                                    <option value={2}>2</option>
+                                    <option value={3}>3</option>
+                                    <option value={4}>4</option>
+                                    <option value={5}>5</option>
+                                  </select>
+                                </label>
+                                <div className="option-list">
+                                  {question.options.map((option, optionIndex) => (
+                                    <div className="option-row" key={option.id}>
+                                      <span className="option-label">
+                                        {OPTION_LABELS[optionIndex] ?? '?'}
+                                      </span>
+                                      <input
+                                        value={option.text}
+                                        onChange={(event) =>
+                                          updateTestQuestion(
+                                            question.id,
+                                            (current) => ({
+                                              ...current,
+                                              options: current.options.map((item) =>
+                                                item.id === option.id
+                                                  ? {
+                                                      ...item,
+                                                      text: event.target.value,
+                                                    }
+                                                  : item,
+                                              ),
+                                            }),
+                                          )
+                                        }
+                                        placeholder="Odpowiedz"
+                                      />
+                                      <label className="option-correct">
+                                        <input
+                                          type="checkbox"
+                                          checked={option.isCorrect}
+                                          onChange={() =>
+                                            handleQuestionOptionToggle(
+                                              question.id,
+                                              option.id,
+                                            )
+                                          }
+                                        />
+                                        Poprawna
+                                      </label>
+                                    </div>
+                                  ))}
+                                </div>
+                                {!question.options.some((option) => option.isCorrect) && (
+                                  <p className="warning">
+                                    Ustaw przynajmniej jedna poprawna odpowiedz.
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p>Brak pytan. Dodaj pierwsze pytanie.</p>
+                      )}
+                    </div>
+                  </>
+                )}
+
                 <button className="primary" type="submit">
                   Zapisz komponent
                 </button>
               </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTestComponent && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="test-modal">
+            <div className="test-modal-header">
+              <div>
+                <h3>{activeTestComponent.title}</h3>
+                <p>{activeTestComponent.questions.length} pytań</p>
+              </div>
+              <button className="ghost" type="button" onClick={handleCloseTest}>
+                Zamknij
+              </button>
+            </div>
+            {activeTestResult && !activeTestProgress ? (
+              <div className="test-result">
+                <div className="test-result-summary">
+                  <h4>
+                    Wynik: {activeTestResult.score}/{activeTestResult.total}
+                  </h4>
+                  <p>
+                    Zakonczono:{' '}
+                    {formatDateTime(new Date(activeTestResult.completedAt))}
+                  </p>
+                  <div className="test-result-actions">
+                    <button
+                      className="ghost"
+                      type="button"
+                      onClick={() => setShowCorrectAnswers((value) => !value)}
+                    >
+                      {showCorrectAnswers
+                        ? 'Ukryj poprawne odpowiedzi'
+                        : 'Pokaz poprawne odpowiedzi'}
+                    </button>
+                    <button
+                      className="primary"
+                      type="button"
+                      onClick={() => {
+                        handleResetTest(activeTestComponent.id)
+                        handleStartTest(activeTestComponent)
+                      }}
+                    >
+                      Rozwiaz jeszcze raz
+                    </button>
+                  </div>
+                </div>
+                {testBadgePreview[activeTestComponent.id] && (
+                  <div className="badge-preview">
+                    <img
+                      src={testBadgePreview[activeTestComponent.id]}
+                      alt="Podglad odznaki testu"
+                    />
+                    <div>
+                      <h4>Odznaka testu</h4>
+                      <p>Możesz ją zapisać lokalnie.</p>
+                    </div>
+                  </div>
+                )}
+                {showCorrectAnswers && (
+                  <div className="test-review">
+                    {activeTestComponent.questions.map((question, index) => (
+                      <div className="test-review-question" key={question.id}>
+                        <strong>
+                          Pytanie {index + 1}: {question.prompt}
+                        </strong>
+                        <ul>
+                          {question.options
+                            .filter((option) => option.isCorrect)
+                            .map((option) => (
+                              <li key={option.id}>{option.text}</li>
+                            ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="test-runner">
+                {activeTestProgress ? (
+                  (() => {
+                    const questionId =
+                      activeTestProgress.questionOrder[
+                        activeTestProgress.currentIndex
+                      ]
+                    const question = activeTestComponent.questions.find(
+                      (item) => item.id === questionId,
+                    )
+                    if (!question) {
+                      return <p>Brak pytania do wyswietlenia.</p>
+                    }
+                    const orderedOptionIds =
+                      activeTestProgress.optionOrder[question.id] ??
+                      question.options.map((option) => option.id)
+                    const orderedOptions = orderedOptionIds
+                      .map((id) =>
+                        question.options.find((option) => option.id === id),
+                      )
+                      .filter(isDefined)
+                    const selected = new Set(
+                      activeTestProgress.answers[question.id] ?? [],
+                    )
+                    return (
+                      <>
+                        <div className="test-progress">
+                          Pytanie {activeTestProgress.currentIndex + 1} z{' '}
+                          {activeTestProgress.questionOrder.length}
+                        </div>
+                        <div className="test-question">
+                          <h4>{question.prompt}</h4>
+                          {question.rows.length > 0 && (
+                            <div className="question-grid">
+                              {question.rows.map((row) => (
+                                <div className="question-row" key={row.id}>
+                                  {row.columns.map((block) => (
+                                    <div
+                                      key={block.id}
+                                      className={`question-block span-${block.span}`}
+                                    >
+                                      {block.type === 'text' && (
+                                        <MarkdownBlock markdown={block.markdown} />
+                                      )}
+                                      {block.type === 'image' && (
+                                        <div className="image-grid">
+                                          {block.images.map((image) => (
+                                            <button
+                                              key={image.src}
+                                              className="image-tile"
+                                              type="button"
+                                              onClick={() =>
+                                                setLightboxImage(image)
+                                              }
+                                            >
+                                              <ResolvedImage
+                                                src={image.src}
+                                                alt={image.alt}
+                                              />
+                                              {image.caption && (
+                                                <span>{image.caption}</span>
+                                              )}
+                                            </button>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {block.type === 'video' && (
+                                        <div className="video-block">
+                                          <div className="video-header">
+                                            <h3>{block.title}</h3>
+                                            {block.description && (
+                                              <p>{block.description}</p>
+                                            )}
+                                          </div>
+                                          {block.embedUrl ? (
+                                            <iframe
+                                              title={block.title}
+                                              src={block.embedUrl}
+                                              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                              allowFullScreen
+                                              loading="lazy"
+                                            />
+                                          ) : block.assetId ? (
+                                            <ResolvedVideo
+                                              src={`asset:${block.assetId}`}
+                                              title={block.title}
+                                            />
+                                          ) : (
+                                            <div className="video-placeholder">
+                                              Wideo zostanie wstawione przez nauczyciela.
+                                            </div>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div className="test-options">
+                          {orderedOptions.map((option, optionIndex) => (
+                            <label key={option.id} className="test-option">
+                              <input
+                                type="checkbox"
+                                checked={selected.has(option.id)}
+                                onChange={() =>
+                                  handleTestAnswerToggle(
+                                    activeTestComponent.id,
+                                    question.id,
+                                    option.id,
+                                  )
+                                }
+                              />
+                              <span className="option-label">
+                                {OPTION_LABELS[optionIndex] ?? '?'}
+                              </span>
+                              <span>{option.text}</span>
+                            </label>
+                          ))}
+                        </div>
+                        <div className="test-navigation">
+                          <button
+                            className="ghost"
+                            type="button"
+                            onClick={() =>
+                              handleTestNavigation(activeTestComponent.id, 'prev')
+                            }
+                            disabled={activeTestProgress.currentIndex === 0}
+                          >
+                            Poprzednie
+                          </button>
+                          {activeTestProgress.currentIndex <
+                          activeTestProgress.questionOrder.length - 1 ? (
+                            <button
+                              className="primary"
+                              type="button"
+                              onClick={() =>
+                                handleTestNavigation(activeTestComponent.id, 'next')
+                              }
+                            >
+                              Następne
+                            </button>
+                          ) : (
+                            <button
+                              className="primary"
+                              type="button"
+                              onClick={() => handleFinishTest(activeTestComponent)}
+                            >
+                              Zakończ test
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    )
+                  })()
+                ) : (
+                  <p>Nie znaleziono zapisanego postępu testu.</p>
+                )}
+              </div>
             )}
           </div>
         </div>

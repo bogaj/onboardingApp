@@ -10,16 +10,16 @@
 
   --font-display: 'Space Grotesk', 'Segoe UI', 'Trebuchet MS', sans-serif;
   --font-body: 'IBM Plex Sans', 'Segoe UI', 'Trebuchet MS', sans-serif;
-  --bg: #f3eee7;
-  --bg-deep: #e6dac8;
+  --bg: #f2f6fc;
+  --bg-deep: #dfe9f7;
   --ink: #1c2433;
   --ink-soft: #4b586f;
-  --accent: #d45a2a;
-  --accent-strong: #b4471f;
+  --accent: #2f6fe0;
+  --accent-strong: #1f55b5;
   --link: #1a5fd0;
   --teal: #2a6d6d;
   --card: #ffffff;
-  --line: #d9cbbb;
+  --line: #cbd7ea;
   --shadow: rgba(12, 18, 28, 0.12);
   --shadow-strong: rgba(12, 18, 28, 0.2);
 }
@@ -36,12 +36,12 @@ body {
   background-color: var(--bg);
   background-image: radial-gradient(
       circle at 15% 20%,
-      rgba(212, 90, 42, 0.18),
+      rgba(47, 111, 224, 0.18),
       transparent 55%
     ),
     radial-gradient(
       circle at 85% 15%,
-      rgba(42, 109, 109, 0.2),
+      rgba(83, 140, 224, 0.18),
       transparent 50%
     ),
     linear-gradient(120deg, rgba(255, 255, 255, 0.7), transparent);
@@ -69,5 +69,5 @@ textarea {
 }
 
 ::selection {
-  background: rgba(212, 90, 42, 0.25);
+  background: rgba(47, 111, 224, 0.25);
 }

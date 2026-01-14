@@ -12,4 +12,8 @@ module.exports = {
   win: {
     target: ['nsis', 'zip'],
   },
+  nsis: {
+    oneClick: false,
+    allowToChangeInstallationDirectory: true,
+  },
 }
