@@ -21,6 +21,12 @@ const RICH_TEXT_COLORS = [
 ]
 
 const LINK_COLOR = '#1a5fd0'
+const ASSET_KIND_LABELS: Record<'image' | 'video' | 'file', string> = {
+  image: 'Obraz',
+  video: 'Wideo',
+  file: 'Plik',
+}
+const MAX_LESSON_VERSIONS = 3
 
 const DEFAULT_RICH_TOOLBAR_STATE: RichToolbarState = {
   bold: false,
@@ -131,6 +137,18 @@ type Lesson = {
   rows: LessonRow[]
 }
 
+type LessonSnapshot = {
+  savedAt: string
+  lesson: Lesson
+}
+
+type LessonStats = {
+  rows: number
+  components: number
+  byType: Record<LessonComponent['type'], number>
+  questions: number
+}
+
 type Topic = {
   id: string
   title: string
@@ -166,6 +184,8 @@ type TestResult = {
 
 type AssetFile = { id: string; name: string; size?: number }
 type ImageAssetForm = AssetFile & { alt: string; caption: string }
+type AssetLibraryKind = 'image' | 'video' | 'file'
+type AssetLibraryItem = AssetFile & { kind: AssetLibraryKind; addedAt: string }
 
 type FileFilter = { name: string; extensions: string[] }
 
@@ -938,6 +958,73 @@ const formatFileSize = (size?: number) => {
     return `${kb.toFixed(1)} KB`
   }
   return `${(kb / 1024).toFixed(1)} MB`
+}
+
+const cloneLesson = (lesson: Lesson): Lesson =>
+  JSON.parse(JSON.stringify(lesson)) as Lesson
+
+const getLessonStats = (lesson: Lesson): LessonStats => {
+  const byType: LessonStats['byType'] = {
+    text: 0,
+    video: 0,
+    image: 0,
+    download: 0,
+    test: 0,
+  }
+  let components = 0
+  let questions = 0
+  lesson.rows.forEach((row) => {
+    row.columns.forEach((column) => {
+      components += 1
+      byType[column.type] += 1
+      if (column.type === 'test') {
+        questions += column.questions.length
+      }
+    })
+  })
+  return {
+    rows: lesson.rows.length,
+    components,
+    byType,
+    questions,
+  }
+}
+
+const formatDelta = (value: number) =>
+  value > 0 ? `+${value}` : `${value}`
+
+const buildLessonDiffLines = (version: Lesson, current: Lesson) => {
+  const lines: string[] = []
+  if (version.title !== current.title) {
+    lines.push(`Tytuł: ${version.title}`)
+  }
+  if (version.summary !== current.summary) {
+    lines.push('Opis: zmieniony')
+  }
+  if (version.duration !== current.duration) {
+    lines.push(`Czas: ${version.duration}`)
+  }
+  if (version.difficulty !== current.difficulty) {
+    lines.push(`Poziom: ${version.difficulty}`)
+  }
+  const versionStats = getLessonStats(version)
+  const currentStats = getLessonStats(current)
+  const deltas: Array<[string, number]> = [
+    ['Wiersze', versionStats.rows - currentStats.rows],
+    ['Komponenty', versionStats.components - currentStats.components],
+    ['Tekst', versionStats.byType.text - currentStats.byType.text],
+    ['Wideo', versionStats.byType.video - currentStats.byType.video],
+    ['Obraz', versionStats.byType.image - currentStats.byType.image],
+    ['Pliki', versionStats.byType.download - currentStats.byType.download],
+    ['Testy', versionStats.byType.test - currentStats.byType.test],
+    ['Pytania', versionStats.questions - currentStats.questions],
+  ]
+  deltas.forEach(([label, delta]) => {
+    if (delta !== 0) {
+      lines.push(`${label}: ${formatDelta(delta)}`)
+    }
+  })
+  return lines.length ? lines : ['Brak różnic względem aktualnej wersji.']
 }
 
 const rgbToHex = (value: string) => {
@@ -1792,6 +1879,9 @@ function App() {
     'tga-student-name',
     'Nowy pilot',
   )
+  const [studentPanelOpen, setStudentPanelOpen] = useState(false)
+  const [studentDraftName, setStudentDraftName] = useState(studentName)
+  const [versionDialogOpen, setVersionDialogOpen] = useState(false)
   const [completedLessons, setCompletedLessons] = useLocalStorageState<string[]>(
     'tga-completed-lessons',
     [],
@@ -1800,6 +1890,9 @@ function App() {
     'tga-topics',
     seedTopics,
   )
+  const [assetLibrary, setAssetLibrary] = useLocalStorageState<
+    AssetLibraryItem[]
+  >('tga-asset-library', [])
   const [activeLessonId, setActiveLessonId] = useState(
     topics[0]?.lessons[0]?.id ?? '',
   )
@@ -1852,6 +1945,12 @@ function App() {
   const [testBadgePreview, setTestBadgePreview] = useState<
     Record<string, string>
   >({})
+  const [lessonAutosaves, setLessonAutosaves] = useLocalStorageState<
+    Record<string, LessonSnapshot>
+  >('tga-lesson-autosave', {})
+  const [lessonVersions, setLessonVersions] = useLocalStorageState<
+    Record<string, LessonSnapshot[]>
+  >('tga-lesson-versions', {})
   const [testProgress, setTestProgress] = useLocalStorageState<
     Record<string, TestProgress>
   >('tga-test-progress', {})
@@ -1866,6 +1965,7 @@ function App() {
   const [questionComponentForm, setQuestionComponentForm] =
     useState<ContentComponentFormState>(createEmptyContentForm())
   const [lightboxImage, setLightboxImage] = useState<LightboxImage | null>(null)
+  const lastAutosaveRef = useRef<Record<string, string>>({})
 
   const normalizedSearch = normalizeText(searchValue.trim())
   const allLessons = topics.flatMap((topic) => topic.lessons)
@@ -1885,6 +1985,28 @@ function App() {
             column.type === 'test' && column.id === activeTestId,
         ) ?? null
     : null
+  const activeLessonAutosave = activeLesson
+    ? lessonAutosaves[activeLesson.id]
+    : undefined
+  const activeLessonVersions = activeLesson
+    ? lessonVersions[activeLesson.id] ?? []
+    : []
+  const orderedLessonVersions = useMemo(
+    () => [...activeLessonVersions].sort((a, b) => b.savedAt.localeCompare(a.savedAt)),
+    [activeLessonVersions],
+  )
+  const libraryImages = useMemo(
+    () => assetLibrary.filter((item) => item.kind === 'image'),
+    [assetLibrary],
+  )
+  const libraryVideos = useMemo(
+    () => assetLibrary.filter((item) => item.kind === 'video'),
+    [assetLibrary],
+  )
+  const libraryFiles = useMemo(
+    () => assetLibrary.filter((item) => item.kind === 'file'),
+    [assetLibrary],
+  )
   const activeTestProgress = activeTestComponent
     ? testProgress[activeTestComponent.id]
     : undefined
@@ -1910,6 +2032,19 @@ function App() {
   }, [activeLessonId, allLessons])
 
   useEffect(() => {
+    if (!teacherMode || !activeLesson) {
+      return
+    }
+    const interval = window.setInterval(() => {
+      const signature = JSON.stringify(activeLesson)
+      if (signature !== lastAutosaveRef.current[activeLesson.id]) {
+        saveLessonAutosave(activeLesson)
+      }
+    }, 45000)
+    return () => window.clearInterval(interval)
+  }, [teacherMode, activeLesson])
+
+  useEffect(() => {
     if (activeTestId && !activeTestComponent) {
       setActiveTestId(null)
     }
@@ -1931,6 +2066,49 @@ function App() {
 
   const completedCount = completedLessons.length
   const totalLessons = allLessons.length
+  const progressPercent = totalLessons
+    ? Math.round((completedCount / totalLessons) * 100)
+    : 0
+  const completedLessonList = useMemo(() => {
+    const items: Array<{ lesson: Lesson; topicTitle: string }> = []
+    topics.forEach((topic) => {
+      topic.lessons.forEach((lesson) => {
+        if (!completedLessons.includes(lesson.id)) {
+          return
+        }
+        items.push({ lesson, topicTitle: topic.title })
+      })
+    })
+    return items
+  }, [topics, completedLessons])
+  const testResultsList = useMemo(() => {
+    const items: Array<{
+      test: TestComponent
+      lessonTitle: string
+      result: TestResult
+    }> = []
+    topics.forEach((topic) => {
+      topic.lessons.forEach((lesson) => {
+        lesson.rows.forEach((row) => {
+          row.columns.forEach((column) => {
+            if (column.type !== 'test') {
+              return
+            }
+            const result = testResults[column.id]
+            if (!result) {
+              return
+            }
+            items.push({
+              test: column,
+              lessonTitle: lesson.title,
+              result,
+            })
+          })
+        })
+      })
+    })
+    return items
+  }, [topics, testResults])
 
   const highlightMatches = (text: string) => {
     if (!searchValue.trim()) {
@@ -1997,6 +2175,145 @@ function App() {
       delete next[activeLesson.id]
       return next
     })
+  }
+
+  const saveLessonAutosave = (lesson: Lesson) => {
+    const snapshot: LessonSnapshot = {
+      savedAt: new Date().toISOString(),
+      lesson: cloneLesson(lesson),
+    }
+    setLessonAutosaves((current) => ({
+      ...current,
+      [lesson.id]: snapshot,
+    }))
+    lastAutosaveRef.current[lesson.id] = JSON.stringify(lesson)
+  }
+
+  const saveLessonVersion = (lesson: Lesson) => {
+    const snapshot: LessonSnapshot = {
+      savedAt: new Date().toISOString(),
+      lesson: cloneLesson(lesson),
+    }
+    setLessonVersions((current) => {
+      const existing = current[lesson.id] ?? []
+      const next = [...existing, snapshot].slice(-MAX_LESSON_VERSIONS)
+      return { ...current, [lesson.id]: next }
+    })
+  }
+
+  const restoreLessonSnapshot = (snapshot: LessonSnapshot) => {
+    setTopics((current) =>
+      current.map((topic) => ({
+        ...topic,
+        lessons: topic.lessons.map((lesson) =>
+          lesson.id === snapshot.lesson.id ? cloneLesson(snapshot.lesson) : lesson,
+        ),
+      })),
+    )
+    lastAutosaveRef.current[snapshot.lesson.id] = JSON.stringify(snapshot.lesson)
+  }
+
+  const openStudentPanel = () => {
+    setStudentDraftName(studentName)
+    setStudentPanelOpen(true)
+  }
+
+  const handleSaveStudentProfile = (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault()
+    const trimmed = studentDraftName.trim()
+    setStudentName(trimmed || 'Nowy pilot')
+    setStudentPanelOpen(false)
+  }
+
+  const handleDownloadLessonBadge = async (lesson: Lesson) => {
+    const badge = await createBadge(studentName, lesson.title)
+    if (badge.dataUrl) {
+      setBadgePreview((previous) => ({
+        ...previous,
+        [lesson.id]: badge.dataUrl,
+      }))
+    }
+    if (badge.blob) {
+      const safeStudent = studentName.trim() || 'Uczen'
+      await downloadBlob(
+        badge.blob,
+        `${slugify(safeStudent)}_${slugify(lesson.title)}.png`,
+      )
+    }
+  }
+
+  const handleDownloadTestBadge = async (
+    test: TestComponent,
+    result: TestResult,
+  ) => {
+    const badge = await createTestBadge(
+      studentName,
+      test.title,
+      result.score,
+      result.total,
+    )
+    if (badge.dataUrl) {
+      setTestBadgePreview((previous) => ({
+        ...previous,
+        [test.id]: badge.dataUrl,
+      }))
+    }
+    if (badge.blob) {
+      const safeStudent = studentName.trim() || 'Uczen'
+      await downloadBlob(
+        badge.blob,
+        `${slugify(safeStudent)}_${slugify(test.title)}.png`,
+      )
+    }
+  }
+
+  const handleSaveLessonVersion = () => {
+    if (!activeLesson) {
+      return
+    }
+    if (activeLessonVersions.length > 0) {
+      const confirmed = window.confirm(
+        `Masz juz zapisane wersje (${activeLessonVersions.length}/${MAX_LESSON_VERSIONS}). ` +
+          'Zapisanie kolejnej wersji moze nadpisac najstarsza. Kontynuowac?',
+      )
+      if (!confirmed) {
+        return
+      }
+    }
+    saveLessonVersion(activeLesson)
+  }
+
+  const handleRestoreLessonVersion = () => {
+    if (!activeLessonVersions.length) {
+      return
+    }
+    setVersionDialogOpen(true)
+  }
+
+  const handleDeleteLessonVersion = (savedAt: string) => {
+    if (!activeLesson) {
+      return
+    }
+    const confirmed = window.confirm('Usunac te wersje?')
+    if (!confirmed) {
+      return
+    }
+    setLessonVersions((current) => {
+      const existing = current[activeLesson.id] ?? []
+      const nextVersions = existing.filter((version) => version.savedAt !== savedAt)
+      return { ...current, [activeLesson.id]: nextVersions }
+    })
+  }
+
+  const handleRestoreLessonAutosave = () => {
+    if (!activeLesson || !activeLessonAutosave) {
+      return
+    }
+    const confirmed = window.confirm('Przywrócić ostatni autozapis?')
+    if (!confirmed) {
+      return
+    }
+    restoreLessonSnapshot(activeLessonAutosave)
   }
 
   const ensureTestProgress = (test: TestComponent) => {
@@ -2431,6 +2748,21 @@ function App() {
       })
       return next
     })
+    setLessonAutosaves((current) => {
+      const next = { ...current }
+      removedLessonIds.forEach((lessonId) => {
+        delete next[lessonId]
+        delete lastAutosaveRef.current[lessonId]
+      })
+      return next
+    })
+    setLessonVersions((current) => {
+      const next = { ...current }
+      removedLessonIds.forEach((lessonId) => {
+        delete next[lessonId]
+      })
+      return next
+    })
     if (removedTestIds.length) {
       setTestProgress((current) => {
         const next = { ...current }
@@ -2527,6 +2859,17 @@ function App() {
     )
     setBadgePreview((previous) => {
       const next = { ...previous }
+      delete next[lessonId]
+      return next
+    })
+    setLessonAutosaves((current) => {
+      const next = { ...current }
+      delete next[lessonId]
+      delete lastAutosaveRef.current[lessonId]
+      return next
+    })
+    setLessonVersions((current) => {
+      const next = { ...current }
       delete next[lessonId]
       return next
     })
@@ -2789,6 +3132,137 @@ function App() {
     }))
   }
 
+  const addAssetsToLibrary = (items: AssetFile[], kind: AssetLibraryKind) => {
+    if (!items.length) {
+      return
+    }
+    setAssetLibrary((current) => {
+      const existing = new Set(current.map((item) => item.id))
+      const next = [...current]
+      const addedAt = new Date().toISOString()
+      items.forEach((item) => {
+        if (existing.has(item.id)) {
+          return
+        }
+        next.push({ ...item, kind, addedAt })
+      })
+      return next
+    })
+  }
+
+  const removeAssetFromLibrary = (assetId: string) => {
+    setAssetLibrary((current) => current.filter((item) => item.id !== assetId))
+  }
+
+  const addLibraryDownloadFile = (item: AssetLibraryItem) => {
+    setComponentForm((current) => {
+      if (current.assetFiles.some((file) => file.id === item.id)) {
+        return current
+      }
+      return {
+        ...current,
+        assetFiles: [
+          ...current.assetFiles,
+          { id: item.id, name: item.name, size: item.size },
+        ],
+      }
+    })
+  }
+
+  const addLibraryImageAsset = (item: AssetLibraryItem) => {
+    setComponentForm((current) => {
+      if (current.imageAssets.some((file) => file.id === item.id)) {
+        return current
+      }
+      return {
+        ...current,
+        imageAssets: [
+          ...current.imageAssets,
+          { id: item.id, name: item.name, size: item.size, alt: item.name, caption: '' },
+        ],
+      }
+    })
+  }
+
+  const useLibraryVideoAsset = (item: AssetLibraryItem) => {
+    setComponentForm((current) => ({
+      ...current,
+      videoAsset: { id: item.id, name: item.name, size: item.size },
+    }))
+  }
+
+  const addLibraryQuestionImage = (item: AssetLibraryItem) => {
+    setQuestionComponentForm((current) => {
+      if (current.imageAssets.some((file) => file.id === item.id)) {
+        return current
+      }
+      return {
+        ...current,
+        imageAssets: [
+          ...current.imageAssets,
+          { id: item.id, name: item.name, size: item.size, alt: item.name, caption: '' },
+        ],
+      }
+    })
+  }
+
+  const useLibraryQuestionVideo = (item: AssetLibraryItem) => {
+    setQuestionComponentForm((current) => ({
+      ...current,
+      videoAsset: { id: item.id, name: item.name, size: item.size },
+    }))
+  }
+
+  const handlePickLibraryImages = async () => {
+    const electronApi = getElectronApi()
+    if (!electronApi?.pickFiles) {
+      window.alert(
+        'Dodawanie plików jest dostępne tylko w aplikacji desktopowej.',
+      )
+      return
+    }
+    const picked = await electronApi.pickFiles({
+      filters: [
+        {
+          name: 'Images',
+          extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'],
+        },
+      ],
+    })
+    addAssetsToLibrary(picked, 'image')
+  }
+
+  const handlePickLibraryVideos = async () => {
+    const electronApi = getElectronApi()
+    if (!electronApi?.pickFiles) {
+      window.alert(
+        'Dodawanie plików jest dostępne tylko w aplikacji desktopowej.',
+      )
+      return
+    }
+    const picked = await electronApi.pickFiles({
+      filters: [
+        {
+          name: 'Video',
+          extensions: ['mp4', 'webm', 'mov', 'm4v', 'ogv'],
+        },
+      ],
+    })
+    addAssetsToLibrary(picked, 'video')
+  }
+
+  const handlePickLibraryFiles = async () => {
+    const electronApi = getElectronApi()
+    if (!electronApi?.pickFiles) {
+      window.alert(
+        'Dodawanie plików jest dostępne tylko w aplikacji desktopowej.',
+      )
+      return
+    }
+    const picked = await electronApi.pickFiles()
+    addAssetsToLibrary(picked, 'file')
+  }
+
   const handlePickDownloadAssets = async () => {
     const electronApi = getElectronApi()
     if (!electronApi?.pickFiles) {
@@ -2801,6 +3275,7 @@ function App() {
     if (!picked.length) {
       return
     }
+    addAssetsToLibrary(picked, 'file')
     setComponentForm((current) => ({
       ...current,
       assetFiles: [...current.assetFiles, ...picked],
@@ -2833,6 +3308,7 @@ function App() {
     if (!picked.length) {
       return
     }
+    addAssetsToLibrary(picked, 'image')
     const mapped: ImageAssetForm[] = picked.map((file) => ({
       ...file,
       alt: file.name,
@@ -2870,6 +3346,7 @@ function App() {
     if (!picked.length) {
       return
     }
+    addAssetsToLibrary(picked, 'video')
     setComponentForm((current) => ({
       ...current,
       videoAsset: picked[0],
@@ -2902,6 +3379,7 @@ function App() {
     if (!picked.length) {
       return
     }
+    addAssetsToLibrary(picked, 'image')
     const mapped: ImageAssetForm[] = picked.map((file) => ({
       ...file,
       alt: file.name,
@@ -2939,6 +3417,7 @@ function App() {
     if (!picked.length) {
       return
     }
+    addAssetsToLibrary(picked, 'video')
     setQuestionComponentForm((current) => ({
       ...current,
       videoAsset: picked[0],
@@ -3551,6 +4030,22 @@ function App() {
       setCompletedLessons((current) =>
         current.filter((id) => id !== replacedLessonId),
       )
+      setBadgePreview((previous) => {
+        const next = { ...previous }
+        delete next[replacedLessonId]
+        return next
+      })
+      setLessonAutosaves((current) => {
+        const next = { ...current }
+        delete next[replacedLessonId]
+        delete lastAutosaveRef.current[replacedLessonId]
+        return next
+      })
+      setLessonVersions((current) => {
+        const next = { ...current }
+        delete next[replacedLessonId]
+        return next
+      })
       if (replacedTestIds.length) {
         setTestProgress((current) => {
           const next = { ...current }
@@ -3679,6 +4174,45 @@ function App() {
           </button>
         </div>
       </div>
+      {activeLesson && (
+        <div className="teacher-lesson-meta">
+          <div className="teacher-lesson-info">
+            <span>
+              Autozapis:{' '}
+              {activeLessonAutosave
+                ? formatDateTime(new Date(activeLessonAutosave.savedAt))
+                : 'brak'}
+            </span>
+            <span>Wersje: {activeLessonVersions.length}/{MAX_LESSON_VERSIONS}</span>
+          </div>
+          <div className="teacher-lesson-actions">
+            <button
+              className="ghost small"
+              type="button"
+              onClick={handleSaveLessonVersion}
+              disabled={!activeLesson}
+            >
+              Zapisz wersję
+            </button>
+            <button
+              className="ghost small"
+              type="button"
+              onClick={handleRestoreLessonVersion}
+              disabled={!activeLessonVersions.length}
+            >
+              Przywróć wersję
+            </button>
+            <button
+              className="ghost small"
+              type="button"
+              onClick={handleRestoreLessonAutosave}
+              disabled={!activeLessonAutosave}
+            >
+              Przywróć autozapis
+            </button>
+          </div>
+        </div>
+      )}
       <div className="teacher-sections">
         <div className="teacher-section">
           <h4>Tematy</h4>
@@ -3721,6 +4255,71 @@ function App() {
             )}
           </div>
         </div>
+        <div className="teacher-section">
+          <div className="teacher-library-header">
+            <h4>Biblioteka zasobów</h4>
+            <div className="teacher-library-actions">
+              <button
+                className="ghost small"
+                type="button"
+                onClick={handlePickLibraryImages}
+              >
+                + obraz
+              </button>
+              <button
+                className="ghost small"
+                type="button"
+                onClick={handlePickLibraryVideos}
+              >
+                + wideo
+              </button>
+              <button
+                className="ghost small"
+                type="button"
+                onClick={handlePickLibraryFiles}
+              >
+                + plik
+              </button>
+            </div>
+          </div>
+          {assetLibrary.length ? (
+            <div className="asset-library-grid">
+              {assetLibrary.map((item) => (
+                <div className="asset-library-item" key={item.id}>
+                  {item.kind === 'image' ? (
+                    <ResolvedImage
+                      src={`asset:${item.id}`}
+                      alt={item.name}
+                      className="asset-library-thumb"
+                    />
+                  ) : (
+                    <div className={`asset-library-icon ${item.kind}`}>
+                      {item.kind === 'video' ? 'WIDEO' : 'PLIK'}
+                    </div>
+                  )}
+                  <div className="asset-library-meta">
+                    <strong>{item.name}</strong>
+                    <span>
+                      {ASSET_KIND_LABELS[item.kind]}
+                      {item.size ? ` • ${formatFileSize(item.size)}` : ''}
+                    </span>
+                  </div>
+                  <button
+                    className="ghost small"
+                    type="button"
+                    onClick={() => removeAssetFromLibrary(item.id)}
+                  >
+                    Usuń
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-results">
+              Brak zasobów. Dodaj obrazy, wideo lub pliki do biblioteki.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   ) : null
@@ -3736,15 +4335,13 @@ function App() {
           </div>
         </div>
         <div className="header-actions">
-          <div className="student-field">
-            <label htmlFor="studentName">Imię ucznia</label>
-            <input
-              id="studentName"
-              value={studentName}
-              onChange={(event) => setStudentName(event.target.value)}
-              placeholder="Twoje imię"
-            />
-          </div>
+          <button
+            className="ghost student-chip"
+            type="button"
+            onClick={openStudentPanel}
+          >
+            Uczeń: {studentName}
+          </button>
           <div className="progress-chip">
             Ukończono {completedCount}/{totalLessons}
           </div>
@@ -4229,6 +4826,191 @@ function App() {
           )}
         </main>
       </div>
+
+      {studentPanelOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal modal-large student-panel">
+            <div className="modal-header">
+              <h3>Panel ucznia</h3>
+              <button
+                className="ghost"
+                type="button"
+                onClick={() => setStudentPanelOpen(false)}
+              >
+                Zamknij
+              </button>
+            </div>
+            <div className="student-panel-body">
+              <form
+                className="student-profile"
+                onSubmit={handleSaveStudentProfile}
+              >
+                <label>
+                  Imię ucznia
+                  <div className="student-name-row">
+                    <input
+                      value={studentDraftName}
+                      onChange={(event) => setStudentDraftName(event.target.value)}
+                      placeholder="Twoje imię"
+                    />
+                    <button className="primary small" type="submit">
+                      Zapisz ✓
+                    </button>
+                  </div>
+                </label>
+              </form>
+              <div className="student-progress">
+                <div className="student-progress-meta">
+                  <strong>Postęp</strong>
+                  <span>
+                    {completedCount}/{totalLessons} • {progressPercent}%
+                  </span>
+                </div>
+                <div className="progress-bar">
+                  <span style={{ width: `${progressPercent}%` }} />
+                </div>
+              </div>
+              <div className="student-badges">
+                <h4>Odznaki z lekcji</h4>
+                {completedLessonList.length ? (
+                  <div className="student-badge-list">
+                    {completedLessonList.map(({ lesson, topicTitle }) => (
+                      <div className="student-badge-item" key={lesson.id}>
+                        <div>
+                          <strong>{lesson.title}</strong>
+                          <span>
+                            {topicTitle} • Lekcja {lesson.number}
+                          </span>
+                        </div>
+                        <button
+                          className="ghost small"
+                          type="button"
+                          onClick={() => handleDownloadLessonBadge(lesson)}
+                        >
+                          Pobierz odznakę
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p>Brak ukończonych lekcji.</p>
+                )}
+              </div>
+              <div className="student-badges">
+                <h4>Odznaki z testów</h4>
+                {testResultsList.length ? (
+                  <div className="student-badge-list">
+                    {testResultsList.map(({ test, lessonTitle, result }) => (
+                      <div className="student-badge-item" key={test.id}>
+                        <div>
+                          <strong>{test.title}</strong>
+                          <span>
+                            {lessonTitle} • Wynik {result.score}/{result.total}
+                          </span>
+                        </div>
+                        <div className="student-badge-actions">
+                          <span className="student-badge-date">
+                            {formatDateTime(new Date(result.completedAt))}
+                          </span>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() => handleDownloadTestBadge(test, result)}
+                          >
+                            Pobierz odznakę
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p>Brak ukończonych testów.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {versionDialogOpen && activeLesson && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal modal-large version-panel">
+            <div className="modal-header">
+              <h3>Wersje lekcji: {activeLesson.title}</h3>
+              <button
+                className="ghost"
+                type="button"
+                onClick={() => setVersionDialogOpen(false)}
+              >
+                Zamknij
+              </button>
+            </div>
+            <div className="version-panel-body">
+              {orderedLessonVersions.length ? (
+                <div className="version-list">
+                  {orderedLessonVersions.map((snapshot, index) => {
+                    const stats = getLessonStats(snapshot.lesson)
+                    const diffLines = buildLessonDiffLines(
+                      snapshot.lesson,
+                      activeLesson,
+                    )
+                    const versionLabel =
+                      index === 0
+                        ? 'Najnowsza wersja'
+                        : index === 1
+                          ? 'Poprzednia wersja'
+                          : 'Starsza wersja'
+                    return (
+                      <div className="version-card" key={snapshot.savedAt}>
+                        <div className="version-card-header">
+                          <div>
+                            <strong>{versionLabel}</strong>
+                            <span>
+                              {formatDateTime(new Date(snapshot.savedAt))}
+                            </span>
+                          </div>
+                          <div className="version-card-actions">
+                            <button
+                              className="ghost small danger"
+                              type="button"
+                              onClick={() => handleDeleteLessonVersion(snapshot.savedAt)}
+                            >
+                              Usuń
+                            </button>
+                            <button
+                              className="primary small"
+                              type="button"
+                              onClick={() => {
+                                restoreLessonSnapshot(snapshot)
+                                setVersionDialogOpen(false)
+                              }}
+                            >
+                              Przywróć
+                            </button>
+                          </div>
+                        </div>
+                        <div className="version-card-meta">
+                          Wiersze {stats.rows} • Komponenty {stats.components} •
+                          Testy {stats.byType.test} • Pytania {stats.questions}
+                        </div>
+                        <ul className="version-card-diff">
+                          {diffLines.map((line, lineIndex) => (
+                            <li key={`${snapshot.savedAt}-${lineIndex}`}>
+                              {line}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p>Brak zapisanych wersji.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {teacherDialogOpen && (
         <div className="modal-overlay" role="dialog" aria-modal="true">
@@ -5012,6 +5794,38 @@ function App() {
                       ) : (
                         <p>Brak dołączonego wideo.</p>
                       )}
+                      {libraryVideos.length ? (
+                        <div className="asset-library">
+                          <p className="asset-library-title">
+                            Biblioteka wideo
+                          </p>
+                          <div className="asset-library-list">
+                            {libraryVideos.map((item) => {
+                              const selected =
+                                componentForm.videoAsset?.id === item.id
+                              return (
+                                <div className="asset-library-item" key={item.id}>
+                                  <div className="asset-library-icon video">WIDEO</div>
+                                  <div className="asset-library-meta">
+                                    <strong>{item.name}</strong>
+                                    <span>
+                                      {formatFileSize(item.size) || 'wideo'}
+                                    </span>
+                                  </div>
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() => useLibraryVideoAsset(item)}
+                                    disabled={selected}
+                                  >
+                                    {selected ? 'Wybrane' : 'Użyj'}
+                                  </button>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   </>
                 )}
@@ -5107,6 +5921,43 @@ function App() {
                       ) : (
                         <p>Brak dołączonych obrazów.</p>
                       )}
+                      {libraryImages.length ? (
+                        <div className="asset-library">
+                          <p className="asset-library-title">
+                            Biblioteka obrazów
+                          </p>
+                          <div className="asset-library-list">
+                            {libraryImages.map((item) => {
+                              const selected = componentForm.imageAssets.some(
+                                (file) => file.id === item.id,
+                              )
+                              return (
+                                <div className="asset-library-item" key={item.id}>
+                                  <ResolvedImage
+                                    src={`asset:${item.id}`}
+                                    alt={item.name}
+                                    className="asset-library-thumb"
+                                  />
+                                  <div className="asset-library-meta">
+                                    <strong>{item.name}</strong>
+                                    <span>
+                                      {formatFileSize(item.size) || 'obraz'}
+                                    </span>
+                                  </div>
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() => addLibraryImageAsset(item)}
+                                    disabled={selected}
+                                  >
+                                    {selected ? 'Dodany' : 'Dodaj'}
+                                  </button>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   </>
                 )}
@@ -5173,6 +6024,39 @@ function App() {
                       ) : (
                         <p>Brak dołączonych plików.</p>
                       )}
+                      {libraryFiles.length ? (
+                        <div className="asset-library">
+                          <p className="asset-library-title">
+                            Biblioteka plików
+                          </p>
+                          <div className="asset-library-list">
+                            {libraryFiles.map((item) => {
+                              const selected = componentForm.assetFiles.some(
+                                (file) => file.id === item.id,
+                              )
+                              return (
+                                <div className="asset-library-item" key={item.id}>
+                                  <div className="asset-library-icon file">PLIK</div>
+                                  <div className="asset-library-meta">
+                                    <strong>{item.name}</strong>
+                                    <span>
+                                      {formatFileSize(item.size) || 'plik'}
+                                    </span>
+                                  </div>
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() => addLibraryDownloadFile(item)}
+                                    disabled={selected}
+                                  >
+                                    {selected ? 'Dodany' : 'Dodaj'}
+                                  </button>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   </>
                 )}
@@ -5439,6 +6323,50 @@ function App() {
                                         ) : (
                                           <p>Brak obrazow.</p>
                                         )}
+                                        {libraryImages.length ? (
+                                          <div className="asset-library">
+                                            <p className="asset-library-title">
+                                              Biblioteka obrazów
+                                            </p>
+                                            <div className="asset-library-list">
+                                              {libraryImages.map((item) => {
+                                                const selected =
+                                                  questionComponentForm.imageAssets.some(
+                                                    (file) => file.id === item.id,
+                                                  )
+                                                return (
+                                                  <div
+                                                    className="asset-library-item"
+                                                    key={item.id}
+                                                  >
+                                                    <ResolvedImage
+                                                      src={`asset:${item.id}`}
+                                                      alt={item.name}
+                                                      className="asset-library-thumb"
+                                                    />
+                                                    <div className="asset-library-meta">
+                                                      <strong>{item.name}</strong>
+                                                      <span>
+                                                        {formatFileSize(item.size) ||
+                                                          'obraz'}
+                                                      </span>
+                                                    </div>
+                                                    <button
+                                                      className="ghost small"
+                                                      type="button"
+                                                      onClick={() =>
+                                                        addLibraryQuestionImage(item)
+                                                      }
+                                                      disabled={selected}
+                                                    >
+                                                      {selected ? 'Dodany' : 'Dodaj'}
+                                                    </button>
+                                                  </div>
+                                                )
+                                              })}
+                                            </div>
+                                          </div>
+                                        ) : null}
                                       </div>
                                     </>
                                   )}
@@ -5518,6 +6446,47 @@ function App() {
                                         ) : (
                                           <p>Brak wideo.</p>
                                         )}
+                                        {libraryVideos.length ? (
+                                          <div className="asset-library">
+                                            <p className="asset-library-title">
+                                              Biblioteka wideo
+                                            </p>
+                                            <div className="asset-library-list">
+                                              {libraryVideos.map((item) => {
+                                                const selected =
+                                                  questionComponentForm.videoAsset?.id ===
+                                                  item.id
+                                                return (
+                                                  <div
+                                                    className="asset-library-item"
+                                                    key={item.id}
+                                                  >
+                                                    <div className="asset-library-icon video">
+                                                      WIDEO
+                                                    </div>
+                                                    <div className="asset-library-meta">
+                                                      <strong>{item.name}</strong>
+                                                      <span>
+                                                        {formatFileSize(item.size) ||
+                                                          'wideo'}
+                                                      </span>
+                                                    </div>
+                                                    <button
+                                                      className="ghost small"
+                                                      type="button"
+                                                      onClick={() =>
+                                                        useLibraryQuestionVideo(item)
+                                                      }
+                                                      disabled={selected}
+                                                    >
+                                                      {selected ? 'Wybrane' : 'Użyj'}
+                                                    </button>
+                                                  </div>
+                                                )
+                                              })}
+                                            </div>
+                                          </div>
+                                        ) : null}
                                       </div>
                                     </>
                                   )}
