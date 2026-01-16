@@ -3,7 +3,7 @@ import type {
   CSSProperties,
   FormEvent,
   KeyboardEvent,
-  MouseEvent,
+  MouseEvent as ReactMouseEvent,
 } from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import JSZip from 'jszip'
@@ -185,6 +185,7 @@ type TestResult = {
 type AssetFile = { id: string; name: string; size?: number }
 type ImageAssetForm = AssetFile & { alt: string; caption: string }
 type AssetLibraryKind = 'image' | 'video' | 'file'
+type AssetLibraryFilter = AssetLibraryKind | 'all'
 type AssetLibraryItem = AssetFile & { kind: AssetLibraryKind; addedAt: string }
 type AssetLibraryTarget =
   | 'component-image'
@@ -192,8 +193,10 @@ type AssetLibraryTarget =
   | 'component-file'
   | 'question-image'
   | 'question-video'
+  | 'text-image'
+  | 'manage'
 type AssetLibraryModal = {
-  kind: AssetLibraryKind
+  filter: AssetLibraryFilter
   target: AssetLibraryTarget
 }
 
@@ -1048,7 +1051,8 @@ const buildDownloadComponentHtml = (component: DownloadComponent) => {
     listItems ? `<ul>${listItems}</ul>` : '<p>Brak materiałów.</p>',
   ]
   component.files
-    .filter((file) => file.kind === 'text' && file.content.trim())
+    .filter(isTextDownloadFile)
+    .filter((file) => file.content.trim())
     .forEach((file) => {
       parts.push(`<h4>${escapeHtml(file.name)}</h4>`)
       parts.push(`<pre>${escapeHtml(file.content)}</pre>`)
@@ -1084,6 +1088,94 @@ const buildTestComponentHtml = (component: TestComponent) => {
   return parts.join('\n')
 }
 
+const renderAttachmentList = (title: string, items: string[]) => {
+  const content = items.length
+    ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+    : '<p>Brak.</p>'
+  return `<h3>${escapeHtml(title)}</h3>\n${content}`
+}
+
+const collectLessonAttachments = (lesson: Lesson) => {
+  const images = new Set<string>()
+  const videos = new Set<string>()
+  const files = new Set<string>()
+
+  const addImage = (image: ImageItem) => {
+    const label = image.name?.trim() || image.alt?.trim() || 'Obraz'
+    images.add(label)
+  }
+
+  const addAssetImagesFromHtml = (html: string) => {
+    if (typeof document === 'undefined') {
+      return
+    }
+    const container = document.createElement('div')
+    container.innerHTML = html
+    const found = Array.from(container.querySelectorAll('img'))
+    found.forEach((img) => {
+      const src = img.getAttribute('src') ?? ''
+      if (!isAssetSrc(src)) {
+        return
+      }
+      const alt = img.getAttribute('alt')?.trim() || 'Obraz'
+      images.add(alt)
+    })
+  }
+
+  const addVideo = (title?: string, assetName?: string) => {
+    const label = assetName?.trim() || title?.trim() || 'Wideo'
+    videos.add(label)
+  }
+
+  const scanContent = (component: ContentComponent) => {
+    if (component.type === 'text') {
+      addAssetImagesFromHtml(markdownToHtml(component.markdown))
+      return
+    }
+    if (component.type === 'image') {
+      component.images.forEach((image) => {
+        if (isAssetSrc(image.src)) {
+          addImage(image)
+        }
+      })
+      return
+    }
+    if (component.type === 'video' && component.assetId) {
+      addVideo(component.title, component.assetName)
+    }
+  }
+
+  lesson.rows.forEach((row) => {
+    row.columns.forEach((column) => {
+      if (column.type === 'download') {
+        column.files.forEach((file) => {
+          if (file.kind === 'asset') {
+            files.add(file.name)
+          }
+        })
+        return
+      }
+      if (column.type === 'test') {
+        column.questions.forEach((question) => {
+          question.rows.forEach((questionRow) => {
+            questionRow.columns.forEach((block) => {
+              scanContent(block)
+            })
+          })
+        })
+        return
+      }
+      scanContent(column)
+    })
+  })
+
+  return {
+    images: Array.from(images),
+    videos: Array.from(videos),
+    files: Array.from(files),
+  }
+}
+
 const buildConfluenceHtml = (lesson: Lesson, topic: Topic) => {
   const parts: string[] = [
     `<h1>${escapeHtml(lesson.title)}</h1>`,
@@ -1107,6 +1199,20 @@ const buildConfluenceHtml = (lesson: Lesson, topic: Topic) => {
       parts.push(buildContentComponentHtml(component))
     })
   })
+  const attachments = collectLessonAttachments(lesson)
+  if (
+    attachments.images.length ||
+    attachments.videos.length ||
+    attachments.files.length
+  ) {
+    parts.push('<h2>Zalaczniki do recznego dodania</h2>')
+    parts.push(
+      '<p>Dodaj ponizsze pliki jako zalaczniki do strony w Confluence.</p>',
+    )
+    parts.push(renderAttachmentList('Obrazy', attachments.images))
+    parts.push(renderAttachmentList('Wideo', attachments.videos))
+    parts.push(renderAttachmentList('Pliki', attachments.files))
+  }
   parts.push(
     `<p><em>Wygenerowano: ${escapeHtml(
       formatDateTime(new Date()),
@@ -2003,10 +2109,65 @@ const openExternalLink = async (url: string) => {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
-const MarkdownBlock = ({ markdown }: { markdown: string }) => {
+const MarkdownBlock = ({
+  markdown,
+  onImageClick,
+}: {
+  markdown: string
+  onImageClick?: (image: LightboxImage) => void
+}) => {
   const html = useMemo(() => marked.parse(markdown) as string, [markdown])
-  const handleClick = (event: MouseEvent<HTMLDivElement>) => {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const objectUrlsRef = useRef<string[]>([])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) {
+      return
+    }
+    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+    objectUrlsRef.current = []
+    const electronApi = getElectronApi()
+    if (!electronApi?.readAsset) {
+      return
+    }
+    const images = Array.from(container.querySelectorAll('img'))
+    images.forEach((img) => {
+      const src = img.getAttribute('src') ?? ''
+      if (!isAssetSrc(src)) {
+        return
+      }
+      const assetId = assetIdFromSrc(src)
+      electronApi.readAsset(assetId).then((data) => {
+        if (!data) {
+          return
+        }
+        const objectUrl = URL.createObjectURL(new Blob([new Uint8Array(data)]))
+        objectUrlsRef.current.push(objectUrl)
+        img.setAttribute('src', objectUrl)
+      })
+    })
+    return () => {
+      objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+      objectUrlsRef.current = []
+    }
+  }, [html])
+  const handleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null
+    const image = target?.closest('img')
+    if (image) {
+      const src = image.getAttribute('src') ?? ''
+      if (src && onImageClick) {
+        onImageClick({
+          src,
+          alt: image.getAttribute('alt') || 'Obraz',
+          caption: undefined,
+        })
+        event.preventDefault()
+        event.stopPropagation()
+      }
+      return
+    }
     const link = target?.closest('a')
     const href = link?.getAttribute('href')
     if (!href) {
@@ -2017,6 +2178,7 @@ const MarkdownBlock = ({ markdown }: { markdown: string }) => {
   }
   return (
     <div
+      ref={containerRef}
       className="markdown"
       onClick={handleClick}
       dangerouslySetInnerHTML={{ __html: html }}
@@ -2048,6 +2210,10 @@ function App() {
   const [assetLibraryModal, setAssetLibraryModal] =
     useState<AssetLibraryModal | null>(null)
   const [assetLibrarySearch, setAssetLibrarySearch] = useState('')
+  const [libraryPosition, setLibraryPosition] = useState<{
+    x: number
+    y: number
+  } | null>(null)
   const [activeLessonId, setActiveLessonId] = useState(
     topics[0]?.lessons[0]?.id ?? '',
   )
@@ -2121,6 +2287,10 @@ function App() {
     useState<ContentComponentFormState>(createEmptyContentForm())
   const [lightboxImage, setLightboxImage] = useState<LightboxImage | null>(null)
   const lastAutosaveRef = useRef<Record<string, string>>({})
+  const richImageUrlsRef = useRef<Map<string, string>>(new Map())
+  const richSelectedImageRef = useRef<HTMLImageElement | null>(null)
+  const libraryModalRef = useRef<HTMLDivElement | null>(null)
+  const libraryDragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
 
   const normalizedSearch = normalizeText(searchValue.trim())
   const allLessons = topics.flatMap((topic) => topic.lessons)
@@ -2152,12 +2322,26 @@ function App() {
   )
   const librarySearch = assetLibrarySearch.trim().toLowerCase()
   const libraryModalItems = assetLibraryModal
-    ? assetLibrary.filter(
-        (item) =>
-          item.kind === assetLibraryModal.kind &&
-          (!librarySearch || item.name.toLowerCase().includes(librarySearch)),
-      )
+    ? assetLibrary.filter((item) => {
+        if (assetLibraryModal.filter !== 'all') {
+          if (item.kind !== assetLibraryModal.filter) {
+            return false
+          }
+        }
+        if (librarySearch && !item.name.toLowerCase().includes(librarySearch)) {
+          return false
+        }
+        return true
+      })
     : []
+  const libraryCounts = useMemo(
+    () => ({
+      images: assetLibrary.filter((item) => item.kind === 'image').length,
+      videos: assetLibrary.filter((item) => item.kind === 'video').length,
+      files: assetLibrary.filter((item) => item.kind === 'file').length,
+    }),
+    [assetLibrary],
+  )
   const activeTestProgress = activeTestComponent
     ? testProgress[activeTestComponent.id]
     : undefined
@@ -2194,6 +2378,42 @@ function App() {
     }, 45000)
     return () => window.clearInterval(interval)
   }, [teacherMode, activeLesson])
+
+  useEffect(() => {
+    if (!assetLibraryModal) {
+      setLibraryPosition(null)
+      libraryDragRef.current = null
+    }
+  }, [assetLibraryModal])
+
+  useEffect(() => {
+    const handleMove = (event: MouseEvent) => {
+      if (!libraryDragRef.current) {
+        return
+      }
+      const { offsetX, offsetY } = libraryDragRef.current
+      setLibraryPosition({
+        x: Math.max(12, event.clientX - offsetX),
+        y: Math.max(12, event.clientY - offsetY),
+      })
+    }
+    const handleUp = () => {
+      libraryDragRef.current = null
+    }
+    window.addEventListener('mousemove', handleMove)
+    window.addEventListener('mouseup', handleUp)
+    return () => {
+      window.removeEventListener('mousemove', handleMove)
+      window.removeEventListener('mouseup', handleUp)
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      richImageUrlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+      richImageUrlsRef.current.clear()
+    }
+  }, [])
 
   useEffect(() => {
     if (activeTestId && !activeTestComponent) {
@@ -3062,7 +3282,7 @@ function App() {
     }
     const markdownOverride =
       componentForm.type === 'text' && textEditorMode === 'rich'
-        ? richTextRef.current?.innerHTML ?? componentForm.markdown
+        ? getRichEditorHtml()
         : componentForm.markdown
     const component = buildComponentFromForm(
       { ...componentForm, markdown: markdownOverride },
@@ -3144,6 +3364,35 @@ function App() {
             ...lesson,
             rows: nextRows.length ? nextRows : [createPlaceholderRow()],
           }
+        }),
+      })),
+    )
+  }
+
+  const handleMoveLessonRow = (
+    lessonId: string,
+    rowId: string,
+    direction: 'up' | 'down',
+  ) => {
+    setTopics((current) =>
+      current.map((topic) => ({
+        ...topic,
+        lessons: topic.lessons.map((lesson) => {
+          if (lesson.id !== lessonId) {
+            return lesson
+          }
+          const index = lesson.rows.findIndex((row) => row.id === rowId)
+          if (index === -1) {
+            return lesson
+          }
+          const nextIndex = direction === 'up' ? index - 1 : index + 1
+          if (nextIndex < 0 || nextIndex >= lesson.rows.length) {
+            return lesson
+          }
+          const nextRows = [...lesson.rows]
+          const [row] = nextRows.splice(index, 1)
+          nextRows.splice(nextIndex, 0, row)
+          return { ...lesson, rows: nextRows }
         }),
       })),
     )
@@ -3364,9 +3613,17 @@ function App() {
     }))
   }
 
-  const openAssetLibrary = (kind: AssetLibraryKind, target: AssetLibraryTarget) => {
+  const openAssetLibrary = (
+    filter: AssetLibraryFilter,
+    target: AssetLibraryTarget,
+  ) => {
     setAssetLibrarySearch('')
-    setAssetLibraryModal({ kind, target })
+    setAssetLibraryModal({ filter, target })
+    if (typeof window !== 'undefined') {
+      const width = 520
+      const x = Math.max(20, window.innerWidth - width - 24)
+      setLibraryPosition({ x, y: 120 })
+    }
   }
 
   const closeAssetLibrary = () => {
@@ -3395,6 +3652,11 @@ function App() {
         useLibraryQuestionVideo(item)
         closeAssetLibrary()
         break
+      case 'text-image':
+        insertRichImage(item)
+        break
+      case 'manage':
+        break
       default:
         break
     }
@@ -3415,6 +3677,9 @@ function App() {
         return questionComponentForm.imageAssets.some((file) => file.id === item.id)
       case 'question-video':
         return questionComponentForm.videoAsset?.id === item.id
+      case 'text-image':
+      case 'manage':
+        return false
       default:
         return false
     }
@@ -3651,6 +3916,7 @@ function App() {
       ? source
       : (marked.parse(source) as string)
     element.innerHTML = html
+    resolveRichImageAssets()
   }, [componentForm.markdown, componentForm.type, textEditorMode])
 
   const updateMarkdownValue = (
@@ -3852,6 +4118,133 @@ function App() {
     applyRichCommand('fontSize', size)
   }
 
+  const resolveRichImageAssets = () => {
+    const element = richTextRef.current
+    const electronApi = getElectronApi()
+    if (!element || !electronApi?.readAsset) {
+      return
+    }
+    const images = Array.from(element.querySelectorAll('img'))
+    images.forEach((img) => {
+      const assetSrc = img.getAttribute('data-asset-src') || img.getAttribute('src')
+      if (!assetSrc || !isAssetSrc(assetSrc)) {
+        return
+      }
+      img.setAttribute('data-asset-src', assetSrc)
+      const assetId = assetIdFromSrc(assetSrc)
+      const existing = richImageUrlsRef.current.get(assetId)
+      if (existing) {
+        img.setAttribute('src', existing)
+        return
+      }
+      electronApi.readAsset(assetId).then((data) => {
+        if (!data) {
+          return
+        }
+        const objectUrl = URL.createObjectURL(new Blob([new Uint8Array(data)]))
+        richImageUrlsRef.current.set(assetId, objectUrl)
+        img.setAttribute('src', objectUrl)
+      })
+    })
+  }
+
+  const getRichEditorHtml = () => {
+    const element = richTextRef.current
+    if (!element) {
+      return componentForm.markdown
+    }
+    const clone = element.cloneNode(true) as HTMLElement
+    const images = Array.from(clone.querySelectorAll('img'))
+    images.forEach((img) => {
+      const assetSrc = img.getAttribute('data-asset-src')
+      if (assetSrc && isAssetSrc(assetSrc)) {
+        img.setAttribute('src', assetSrc)
+      }
+      img.removeAttribute('data-asset-src')
+      img.removeAttribute('data-selected')
+    })
+    return clone.innerHTML
+  }
+
+  const insertRichImage = (item: AssetLibraryItem) => {
+    const element = richTextRef.current
+    if (!element) {
+      return
+    }
+    element.focus()
+    const selection = document.getSelection()
+    if (selection && linkSelectionRef.current) {
+      selection.removeAllRanges()
+      selection.addRange(linkSelectionRef.current)
+    }
+    const alt = escapeHtml(item.name)
+    document.execCommand(
+      'insertHTML',
+      false,
+      `<img src="asset:${item.id}" data-asset-src="asset:${item.id}" data-align="left" alt="${alt}" />&nbsp;`,
+    )
+    const nextSelection = document.getSelection()
+    if (nextSelection && nextSelection.rangeCount > 0) {
+      linkSelectionRef.current = nextSelection.getRangeAt(0).cloneRange()
+    }
+    resolveRichImageAssets()
+    requestAnimationFrame(() => updateRichSelectionState())
+  }
+
+  const selectRichImage = (image: HTMLImageElement) => {
+    const element = richTextRef.current
+    if (!element) {
+      return
+    }
+    element.querySelectorAll('img[data-selected]').forEach((img) => {
+      img.removeAttribute('data-selected')
+    })
+    image.setAttribute('data-selected', 'true')
+    richSelectedImageRef.current = image
+  }
+
+  const clearRichImageSelection = () => {
+    const element = richTextRef.current
+    if (!element) {
+      return
+    }
+    element.querySelectorAll('img[data-selected]').forEach((img) => {
+      img.removeAttribute('data-selected')
+    })
+    richSelectedImageRef.current = null
+  }
+
+  const applyRichImageAlign = (align: 'left' | 'center' | 'right' | 'none') => {
+    const element = richTextRef.current
+    if (!element) {
+      return
+    }
+    const image = richSelectedImageRef.current
+    if (!image || !element.contains(image)) {
+      window.alert('Kliknij obrazek w edytorze, aby ustawić wyrównanie.')
+      return
+    }
+    if (align === 'none') {
+      image.removeAttribute('data-align')
+    } else {
+      image.setAttribute('data-align', align)
+    }
+  }
+
+  const openTextImageLibrary = () => {
+    const element = richTextRef.current
+    if (element) {
+      const selection = document.getSelection()
+      if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0)
+        if (element.contains(range.commonAncestorContainer)) {
+          linkSelectionRef.current = range.cloneRange()
+        }
+      }
+    }
+    openAssetLibrary('image', 'text-image')
+  }
+
   const resetRichFormatting = () => {
     applyRichCommand('removeFormat')
     applyRichCommand('unlink')
@@ -3951,8 +4344,16 @@ function App() {
     updateRichSelectionState()
   }
 
-  const handleRichClick = (event: MouseEvent<HTMLDivElement>) => {
+  const handleRichClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null
+    const image = target?.closest('img')
+    if (image && image instanceof HTMLImageElement) {
+      selectRichImage(image)
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+    clearRichImageSelection()
     const link = target?.closest('a')
     const href = link?.getAttribute('href')
     if (!href) {
@@ -4127,6 +4528,52 @@ function App() {
     window.alert(
       'Zapisano HTML do Confluence. Wklej zawartość do Source Editor.',
     )
+  }
+
+  const handleExportAssetLibrary = async () => {
+    const electronApi = getElectronApi()
+    if (!electronApi?.readAsset || !electronApi.saveFile) {
+      window.alert(
+        'Eksport biblioteki jest dostepny tylko w aplikacji desktopowej.',
+      )
+      return
+    }
+    if (!assetLibrary.length) {
+      window.alert('Biblioteka jest pusta.')
+      return
+    }
+    const zip = new JSZip()
+    const usedNames = new Set<string>()
+    const missing: string[] = []
+    for (const item of assetLibrary) {
+      const data = await electronApi.readAsset(item.id)
+      if (!data) {
+        missing.push(item.name)
+        continue
+      }
+      let fileName = item.name || `asset_${item.id}`
+      if (usedNames.has(fileName)) {
+        fileName = `${item.id}_${fileName}`
+      }
+      usedNames.add(fileName)
+      zip.file(fileName, data)
+    }
+    const data = await zip.generateAsync({ type: 'uint8array' })
+    const result = await electronApi.saveFile({
+      defaultPath: 'TopGunAssets.zip',
+      data,
+      filters: [{ name: 'ZIP', extensions: ['zip'] }],
+    })
+    if (!result.saved) {
+      return
+    }
+    if (missing.length) {
+      window.alert(
+        `Wyeksportowano biblioteke, ale brakuje plikow: ${missing.join(', ')}.`,
+      )
+      return
+    }
+    window.alert('Eksport biblioteki zapisany.')
   }
 
   const handleImportLesson = async () => {
@@ -4510,41 +4957,21 @@ function App() {
               >
                 + plik
               </button>
+              <button
+                className="ghost small"
+                type="button"
+                onClick={() => openAssetLibrary('all', 'manage')}
+              >
+                Otwórz bibliotekę
+              </button>
             </div>
           </div>
-          {assetLibrary.length ? (
-            <div className="asset-library-grid">
-              {assetLibrary.map((item) => (
-                <div className="asset-library-item" key={item.id}>
-                  {item.kind === 'image' ? (
-                    <ResolvedImage
-                      src={`asset:${item.id}`}
-                      alt={item.name}
-                      className="asset-library-thumb"
-                    />
-                  ) : (
-                    <div className={`asset-library-icon ${item.kind}`}>
-                      {item.kind === 'video' ? 'WIDEO' : 'PLIK'}
-                    </div>
-                  )}
-                  <div className="asset-library-meta">
-                    <strong>{item.name}</strong>
-                    <span>
-                      {ASSET_KIND_LABELS[item.kind]}
-                      {item.size ? ` • ${formatFileSize(item.size)}` : ''}
-                    </span>
-                  </div>
-                  <button
-                    className="ghost small"
-                    type="button"
-                    onClick={() => removeAssetFromLibrary(item.id)}
-                  >
-                    Usuń
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : (
+          <div className="teacher-library-summary">
+            <span>Obrazy: {libraryCounts.images}</span>
+            <span>Wideo: {libraryCounts.videos}</span>
+            <span>Pliki: {libraryCounts.files}</span>
+          </div>
+          {!assetLibrary.length && (
             <div className="empty-results">
               Brak zasobów. Dodaj obrazy, wideo lub pliki do biblioteki.
             </div>
@@ -4690,7 +5117,7 @@ function App() {
               <div className="lesson-grid">
                 {activeLesson.rows.map((row, rowIndex) => (
                   <div
-                    className="lesson-row"
+                    className="lesson-row-wrapper"
                     key={row.id}
                     style={
                       {
@@ -4698,316 +5125,366 @@ function App() {
                       } as CSSProperties
                     }
                   >
-                    {row.columns.map((column) => {
-                      if (column.type === 'text') {
-                        return (
-                          <div
-                            key={column.id}
-                            className={`lesson-card span-${column.span}`}
+                    {teacherMode && (
+                      <div className="row-toolbar">
+                        <span>Wiersz {rowIndex + 1}</span>
+                        <div className="row-toolbar-actions">
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() =>
+                              handleMoveLessonRow(activeLesson.id, row.id, 'up')
+                            }
+                            disabled={rowIndex === 0}
                           >
-                            {teacherMode && activeLesson && (
-                              <div className="card-toolbar">
-                                <button
-                                  className="ghost small"
-                                  type="button"
-                                  onClick={() =>
-                                    openEditComponent(activeLesson.id, column)
-                                  }
-                                >
-                                  Edytuj
-                                </button>
-                                <button
-                                  className="ghost small"
-                                  type="button"
-                                  onClick={() =>
-                                    handleDeleteComponent(
-                                      activeLesson.id,
-                                      column.id,
-                                    )
-                                  }
-                                >
-                                  Usuń
-                                </button>
-                              </div>
-                            )}
-                            <MarkdownBlock markdown={column.markdown} />
-                          </div>
-                        )
-                      }
-                      if (column.type === 'video') {
-                        return (
-                          <div
-                            key={column.id}
-                            className={`lesson-card span-${column.span}`}
+                            ↑
+                          </button>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() =>
+                              handleMoveLessonRow(activeLesson.id, row.id, 'down')
+                            }
+                            disabled={rowIndex === activeLesson.rows.length - 1}
                           >
-                            {teacherMode && activeLesson && (
-                              <div className="card-toolbar">
-                                <button
-                                  className="ghost small"
-                                  type="button"
-                                  onClick={() =>
-                                    openEditComponent(activeLesson.id, column)
-                                  }
-                                >
-                                  Edytuj
-                                </button>
-                                <button
-                                  className="ghost small"
-                                  type="button"
-                                  onClick={() =>
-                                    handleDeleteComponent(
-                                      activeLesson.id,
-                                      column.id,
-                                    )
-                                  }
-                                >
-                                  Usuń
-                                </button>
-                              </div>
-                            )}
-                            <div className="video-block">
-                              <div className="video-header">
-                                <h3>{column.title}</h3>
-                                {column.description && (
-                                  <p>{column.description}</p>
-                                )}
-                              </div>
-                              {column.embedUrl ? (
-                                <iframe
-                                  title={column.title}
-                                  src={column.embedUrl}
-                                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                                  allowFullScreen
-                                  loading="lazy"
-                                />
-                              ) : column.assetId ? (
-                                <ResolvedVideo
-                                  src={`asset:${column.assetId}`}
-                                  title={column.title}
-                                />
-                              ) : (
-                                <div className="video-placeholder">
-                                  Wideo zostanie wstawione przez nauczyciela.
+                            ↓
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="lesson-row">
+                      {row.columns.map((column) => {
+                        if (column.type === 'text') {
+                          return (
+                            <div
+                              key={column.id}
+                              className={`lesson-card span-${column.span}${
+                                teacherMode ? ' has-toolbar' : ''
+                              }`}
+                            >
+                              {teacherMode && activeLesson && (
+                                <div className="card-toolbar">
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() =>
+                                      openEditComponent(activeLesson.id, column)
+                                    }
+                                  >
+                                    Edytuj
+                                  </button>
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() =>
+                                      handleDeleteComponent(
+                                        activeLesson.id,
+                                        column.id,
+                                      )
+                                    }
+                                  >
+                                    Usuń
+                                  </button>
                                 </div>
                               )}
+                              <MarkdownBlock
+                                markdown={column.markdown}
+                                onImageClick={setLightboxImage}
+                              />
                             </div>
-                          </div>
-                        )
-                      }
-                      if (column.type === 'image') {
-                        return (
-                          <div
-                            key={column.id}
-                            className={`lesson-card span-${column.span}`}
-                          >
-                            {teacherMode && activeLesson && (
-                              <div className="card-toolbar">
-                                <button
-                                  className="ghost small"
-                                  type="button"
-                                  onClick={() =>
-                                    openEditComponent(activeLesson.id, column)
-                                  }
-                                >
-                                  Edytuj
-                                </button>
-                                <button
-                                  className="ghost small"
-                                  type="button"
-                                  onClick={() =>
-                                    handleDeleteComponent(
-                                      activeLesson.id,
-                                      column.id,
-                                    )
-                                  }
-                                >
-                                  Usuń
-                                </button>
-                              </div>
-                            )}
-                            <div className="image-grid">
-                              {column.images.map((image) => (
-                                <button
-                                  key={image.src}
-                                  className="image-tile"
-                                  onClick={() => setLightboxImage(image)}
-                                  type="button"
-                                >
-                                  <ResolvedImage
-                                    src={image.src}
-                                    alt={image.alt}
-                                  />
-                                  {image.caption && (
-                                    <span>{image.caption}</span>
+                          )
+                        }
+                        if (column.type === 'video') {
+                          return (
+                            <div
+                              key={column.id}
+                              className={`lesson-card span-${column.span}${
+                                teacherMode ? ' has-toolbar' : ''
+                              }`}
+                            >
+                              {teacherMode && activeLesson && (
+                                <div className="card-toolbar">
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() =>
+                                      openEditComponent(activeLesson.id, column)
+                                    }
+                                  >
+                                    Edytuj
+                                  </button>
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() =>
+                                      handleDeleteComponent(
+                                        activeLesson.id,
+                                        column.id,
+                                      )
+                                    }
+                                  >
+                                    Usuń
+                                  </button>
+                                </div>
+                              )}
+                              <div className="video-block">
+                                <div className="video-header">
+                                  <h3>{column.title}</h3>
+                                  {column.description && (
+                                    <p>{column.description}</p>
                                   )}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )
-                      }
-                      if (column.type === 'download') {
-                        return (
-                          <div
-                            key={column.id}
-                            className={`lesson-card span-${column.span}`}
-                          >
-                            {teacherMode && activeLesson && (
-                              <div className="card-toolbar">
-                                <button
-                                  className="ghost small"
-                                  type="button"
-                                  onClick={() =>
-                                    openEditComponent(activeLesson.id, column)
-                                  }
-                                >
-                                  Edytuj
-                                </button>
-                                <button
-                                  className="ghost small"
-                                  type="button"
-                                  onClick={() =>
-                                    handleDeleteComponent(
-                                      activeLesson.id,
-                                      column.id,
-                                    )
-                                  }
-                                >
-                                  Usuń
-                                </button>
-                              </div>
-                            )}
-                            <div className="download-block">
-                              <div>
-                                <h3>{column.label}</h3>
-                                <p>
-                                  Pliki zostaną spakowane do ZIP:
-                                  {` ${activeTopic.title}_Lekcja_${activeLesson.number}.zip`}
-                                </p>
-                                {Array.isArray(column.files) &&
-                                column.files.length ? (
-                                  <ul className="download-list">
-                                    {column.files.map((file, index) => (
-                                      <li
-                                        key={`${file.name}-${file.kind}-${index}`}
-                                      >
-                                        <span>{file.name}</span>
-                                        {file.kind === 'asset' ? (
-                                          <em>{formatFileSize(file.size) || 'plik'}</em>
-                                        ) : (
-                                          <em>tekst</em>
-                                        )}
-                                      </li>
-                                    ))}
-                                  </ul>
+                                </div>
+                                {column.embedUrl ? (
+                                  <iframe
+                                    title={column.title}
+                                    src={column.embedUrl}
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                    allowFullScreen
+                                    loading="lazy"
+                                  />
+                                ) : column.assetId ? (
+                                  <ResolvedVideo
+                                    src={`asset:${column.assetId}`}
+                                    title={column.title}
+                                  />
                                 ) : (
-                                  <p>Brak materiałów do pobrania.</p>
+                                  <div className="video-placeholder">
+                                    Wideo zostanie wstawione przez nauczyciela.
+                                  </div>
                                 )}
                               </div>
-                              <button
-                                className="primary"
-                                onClick={() =>
-                                  handleDownloadMaterials(
-                                    activeLesson,
-                                    activeTopic,
-                                    Array.isArray(column.files) ? column.files : [],
-                                  )
-                                }
-                              >
-                                Pobierz materiały
-                              </button>
                             </div>
-                          </div>
-                        )
-                      }
-                      if (column.type === 'test') {
-                        const progress = testProgress[column.id]
-                        const result = testResults[column.id]
-                        const questionCount = column.questions.length
-                        const answeredCount = progress
-                          ? Object.values(progress.answers).filter(
-                              (answers) => answers.length > 0,
-                            ).length
-                          : 0
-                        return (
-                          <div
-                            key={column.id}
-                            className={`lesson-card span-${column.span}`}
-                          >
-                            {teacherMode && activeLesson && (
-                              <div className="card-toolbar">
+                          )
+                        }
+                        if (column.type === 'image') {
+                          return (
+                            <div
+                              key={column.id}
+                              className={`lesson-card span-${column.span}${
+                                teacherMode ? ' has-toolbar' : ''
+                              }`}
+                            >
+                              {teacherMode && activeLesson && (
+                                <div className="card-toolbar">
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() =>
+                                      openEditComponent(activeLesson.id, column)
+                                    }
+                                  >
+                                    Edytuj
+                                  </button>
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() =>
+                                      handleDeleteComponent(
+                                        activeLesson.id,
+                                        column.id,
+                                      )
+                                    }
+                                  >
+                                    Usuń
+                                  </button>
+                                </div>
+                              )}
+                              <div className="image-grid">
+                                {column.images.map((image) => (
+                                  <button
+                                    key={image.src}
+                                    className="image-tile"
+                                    onClick={() => setLightboxImage(image)}
+                                    type="button"
+                                  >
+                                    <ResolvedImage
+                                      src={image.src}
+                                      alt={image.alt}
+                                    />
+                                    {image.caption && (
+                                      <span>{image.caption}</span>
+                                    )}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )
+                        }
+                        if (column.type === 'download') {
+                          return (
+                            <div
+                              key={column.id}
+                              className={`lesson-card span-${column.span}${
+                                teacherMode ? ' has-toolbar' : ''
+                              }`}
+                            >
+                              {teacherMode && activeLesson && (
+                                <div className="card-toolbar">
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() =>
+                                      openEditComponent(activeLesson.id, column)
+                                    }
+                                  >
+                                    Edytuj
+                                  </button>
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() =>
+                                      handleDeleteComponent(
+                                        activeLesson.id,
+                                        column.id,
+                                      )
+                                    }
+                                  >
+                                    Usuń
+                                  </button>
+                                </div>
+                              )}
+                              <div className="download-block">
+                                <div>
+                                  <h3>{column.label}</h3>
+                                  <p>
+                                    Pliki zostaną spakowane do ZIP:
+                                    {` ${activeTopic.title}_Lekcja_${activeLesson.number}.zip`}
+                                  </p>
+                                  {Array.isArray(column.files) &&
+                                  column.files.length ? (
+                                    <ul className="download-list">
+                                      {column.files.map((file, index) => (
+                                        <li
+                                          key={`${file.name}-${file.kind}-${index}`}
+                                        >
+                                          <span>{file.name}</span>
+                                          {file.kind === 'asset' ? (
+                                            <em>
+                                              {formatFileSize(file.size) || 'plik'}
+                                            </em>
+                                          ) : (
+                                            <em>tekst</em>
+                                          )}
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  ) : (
+                                    <p>Brak materiałów do pobrania.</p>
+                                  )}
+                                </div>
                                 <button
-                                  className="ghost small"
-                                  type="button"
+                                  className="primary"
                                   onClick={() =>
-                                    openEditComponent(activeLesson.id, column)
-                                  }
-                                >
-                                  Edytuj
-                                </button>
-                                <button
-                                  className="ghost small"
-                                  type="button"
-                                  onClick={() =>
-                                    handleDeleteComponent(
-                                      activeLesson.id,
-                                      column.id,
+                                    handleDownloadMaterials(
+                                      activeLesson,
+                                      activeTopic,
+                                      Array.isArray(column.files)
+                                        ? column.files
+                                        : [],
                                     )
                                   }
                                 >
-                                  Usuń
+                                  Pobierz materiały
                                 </button>
                               </div>
-                            )}
-                            <div className="test-card">
-                              <div>
-                                <h3>{column.title}</h3>
-                                <p>
-                                  Pytan: {questionCount}
-                                  {result
-                                    ? ` • Wynik: ${result.score}/${result.total}`
-                                    : progress
-                                      ? ` • Postep: ${answeredCount}/${questionCount}`
-                                      : ''}
-                                </p>
-                              </div>
-                              <div className="test-actions">
-                                {result ? (
-                                  <>
-                                    <button
-                                      className="ghost"
-                                      type="button"
-                                      onClick={() => handleViewTestResult(column.id)}
-                                    >
-                                      Zobacz wynik
-                                    </button>
+                            </div>
+                          )
+                        }
+                        if (column.type === 'test') {
+                          const progress = testProgress[column.id]
+                          const result = testResults[column.id]
+                          const questionCount = column.questions.length
+                          const answeredCount = progress
+                            ? Object.values(progress.answers).filter(
+                                (answers) => answers.length > 0,
+                              ).length
+                            : 0
+                          return (
+                            <div
+                              key={column.id}
+                              className={`lesson-card span-${column.span}${
+                                teacherMode ? ' has-toolbar' : ''
+                              }`}
+                            >
+                              {teacherMode && activeLesson && (
+                                <div className="card-toolbar">
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() =>
+                                      openEditComponent(activeLesson.id, column)
+                                    }
+                                  >
+                                    Edytuj
+                                  </button>
+                                  <button
+                                    className="ghost small"
+                                    type="button"
+                                    onClick={() =>
+                                      handleDeleteComponent(
+                                        activeLesson.id,
+                                        column.id,
+                                      )
+                                    }
+                                  >
+                                    Usuń
+                                  </button>
+                                </div>
+                              )}
+                              <div className="test-card">
+                                <div>
+                                  <h3>{column.title}</h3>
+                                  <p>
+                                    Pytan: {questionCount}
+                                    {result
+                                      ? ` • Wynik: ${result.score}/${result.total}`
+                                      : progress
+                                        ? ` • Postep: ${answeredCount}/${questionCount}`
+                                        : ''}
+                                  </p>
+                                </div>
+                                <div className="test-actions">
+                                  {result ? (
+                                    <>
+                                      <button
+                                        className="ghost"
+                                        type="button"
+                                        onClick={() =>
+                                          handleViewTestResult(column.id)
+                                        }
+                                      >
+                                        Zobacz wynik
+                                      </button>
+                                      <button
+                                        className="primary"
+                                        type="button"
+                                        onClick={() => {
+                                          handleResetTest(column.id)
+                                          handleStartTest(column)
+                                        }}
+                                      >
+                                        Rozwiaz jeszcze raz
+                                      </button>
+                                    </>
+                                  ) : (
                                     <button
                                       className="primary"
                                       type="button"
-                                      onClick={() => {
-                                        handleResetTest(column.id)
-                                        handleStartTest(column)
-                                      }}
+                                      onClick={() => handleStartTest(column)}
                                     >
-                                      Rozwiaz jeszcze raz
+                                      {progress
+                                        ? 'Kontynuuj test'
+                                        : 'Rozwiaz test'}
                                     </button>
-                                  </>
-                                ) : (
-                                  <button
-                                    className="primary"
-                                    type="button"
-                                    onClick={() => handleStartTest(column)}
-                                  >
-                                    {progress ? 'Kontynuuj test' : 'Rozwiaz test'}
-                                  </button>
-                                )}
+                                  )}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        )
-                      }
-                      return null
-                    })}
+                          )
+                        }
+                        return null
+                      })}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -5243,13 +5720,53 @@ function App() {
       )}
 
       {assetLibraryModal && (
-        <div className="modal-overlay" role="dialog" aria-modal="true">
-          <div className="modal modal-large library-modal">
-            <div className="modal-header">
+        <div
+          className="modal-overlay library-overlay"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="modal library-modal"
+            ref={libraryModalRef}
+            style={
+              libraryPosition
+                ? {
+                    position: 'fixed',
+                    left: libraryPosition.x,
+                    top: libraryPosition.y,
+                    margin: 0,
+                  }
+                : undefined
+            }
+          >
+            <div
+              className="modal-header"
+              onMouseDown={(event) => {
+                if (
+                  (event.target as HTMLElement).closest(
+                    'button,input,select,textarea',
+                  )
+                ) {
+                  return
+                }
+                const modal = libraryModalRef.current
+                if (!modal) {
+                  return
+                }
+                const rect = modal.getBoundingClientRect()
+                libraryDragRef.current = {
+                  offsetX: event.clientX - rect.left,
+                  offsetY: event.clientY - rect.top,
+                }
+                setLibraryPosition({ x: rect.left, y: rect.top })
+              }}
+            >
               <h3>
-                {assetLibraryModal.kind === 'image'
+                {assetLibraryModal.filter === 'all'
+                  ? 'Biblioteka zasobów'
+                  : assetLibraryModal.filter === 'image'
                   ? 'Biblioteka obrazów'
-                  : assetLibraryModal.kind === 'video'
+                  : assetLibraryModal.filter === 'video'
                     ? 'Biblioteka wideo'
                     : 'Biblioteka plików'}
               </h3>
@@ -5265,7 +5782,7 @@ function App() {
                   placeholder="Szukaj w bibliotece..."
                 />
                 <div className="library-modal-actions">
-                  {assetLibraryModal.kind === 'image' && (
+                  {assetLibraryModal.filter === 'image' && (
                     <button
                       className="ghost small"
                       type="button"
@@ -5274,7 +5791,7 @@ function App() {
                       Dodaj obrazy
                     </button>
                   )}
-                  {assetLibraryModal.kind === 'video' && (
+                  {assetLibraryModal.filter === 'video' && (
                     <button
                       className="ghost small"
                       type="button"
@@ -5283,7 +5800,7 @@ function App() {
                       Dodaj wideo
                     </button>
                   )}
-                  {assetLibraryModal.kind === 'file' && (
+                  {assetLibraryModal.filter === 'file' && (
                     <button
                       className="ghost small"
                       type="button"
@@ -5292,15 +5809,49 @@ function App() {
                       Dodaj pliki
                     </button>
                   )}
+                  {assetLibraryModal.filter === 'all' && (
+                    <>
+                      <button
+                        className="ghost small"
+                        type="button"
+                        onClick={handlePickLibraryImages}
+                      >
+                        Dodaj obrazy
+                      </button>
+                      <button
+                        className="ghost small"
+                        type="button"
+                        onClick={handlePickLibraryVideos}
+                      >
+                        Dodaj wideo
+                      </button>
+                      <button
+                        className="ghost small"
+                        type="button"
+                        onClick={handlePickLibraryFiles}
+                      >
+                        Dodaj pliki
+                      </button>
+                      <button
+                        className="ghost small"
+                        type="button"
+                        onClick={handleExportAssetLibrary}
+                      >
+                        Eksportuj ZIP
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
               {libraryModalItems.length ? (
                 <div className="asset-library-grid">
                   {libraryModalItems.map((item) => {
                     const selected = isLibraryItemSelected(item)
-                    const actionLabel =
-                      assetLibraryModal.target === 'component-video' ||
-                      assetLibraryModal.target === 'question-video'
+                    const isManage = assetLibraryModal.target === 'manage'
+                    const actionLabel = isManage
+                      ? 'Usuń'
+                      : assetLibraryModal.target === 'component-video' ||
+                          assetLibraryModal.target === 'question-video'
                         ? selected
                           ? 'Wybrane'
                           : 'Użyj'
@@ -5326,17 +5877,23 @@ function App() {
                           </div>
                         )}
                         <div className="asset-library-meta">
-                          <strong>{item.name}</strong>
+                          <strong title={item.name}>{item.name}</strong>
                           <span>
                             {ASSET_KIND_LABELS[item.kind]}
                             {item.size ? ` • ${formatFileSize(item.size)}` : ''}
                           </span>
                         </div>
                         <button
-                          className="ghost small"
+                          className={`ghost small ${
+                            isManage ? 'danger' : ''
+                          }`.trim()}
                           type="button"
-                          onClick={() => handleUseLibraryItem(item)}
-                          disabled={selected}
+                          onClick={() =>
+                            isManage
+                              ? removeAssetFromLibrary(item.id)
+                              : handleUseLibraryItem(item)
+                          }
+                          disabled={!isManage && selected}
                         >
                           {actionLabel}
                         </button>
@@ -5776,6 +6333,46 @@ function App() {
                             title="Link"
                           >
                             Link
+                          </button>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={openTextImageLibrary}
+                            title="Obraz"
+                          >
+                            Obraz
+                          </button>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() => applyRichImageAlign('left')}
+                            title="Obraz do lewej"
+                          >
+                            Img L
+                          </button>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() => applyRichImageAlign('center')}
+                            title="Obraz na środku"
+                          >
+                            Img S
+                          </button>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() => applyRichImageAlign('right')}
+                            title="Obraz do prawej"
+                          >
+                            Img P
+                          </button>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() => applyRichImageAlign('none')}
+                            title="Usuń wyrównanie obrazu"
+                          >
+                            Img x
                           </button>
                           <button
                             className={`ghost small ${
@@ -6452,7 +7049,10 @@ function App() {
                                             </div>
                                             <div className="question-block-preview">
                                               {block.type === 'text' && (
-                                                <MarkdownBlock markdown={block.markdown} />
+                                                <MarkdownBlock
+                                                  markdown={block.markdown}
+                                                  onImageClick={setLightboxImage}
+                                                />
                                               )}
                                               {block.type === 'image' && block.images[0] && (
                                                 <ResolvedImage
@@ -6926,7 +7526,10 @@ function App() {
                                       className={`question-block span-${block.span}`}
                                     >
                                       {block.type === 'text' && (
-                                        <MarkdownBlock markdown={block.markdown} />
+                                        <MarkdownBlock
+                                          markdown={block.markdown}
+                                          onImageClick={setLightboxImage}
+                                        />
                                       )}
                                       {block.type === 'image' && (
                                         <div className="image-grid">
