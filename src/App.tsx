@@ -186,6 +186,16 @@ type AssetFile = { id: string; name: string; size?: number }
 type ImageAssetForm = AssetFile & { alt: string; caption: string }
 type AssetLibraryKind = 'image' | 'video' | 'file'
 type AssetLibraryItem = AssetFile & { kind: AssetLibraryKind; addedAt: string }
+type AssetLibraryTarget =
+  | 'component-image'
+  | 'component-video'
+  | 'component-file'
+  | 'question-image'
+  | 'question-video'
+type AssetLibraryModal = {
+  kind: AssetLibraryKind
+  target: AssetLibraryTarget
+}
 
 type FileFilter = { name: string; extensions: string[] }
 
@@ -962,6 +972,148 @@ const formatFileSize = (size?: number) => {
 
 const cloneLesson = (lesson: Lesson): Lesson =>
   JSON.parse(JSON.stringify(lesson)) as Lesson
+
+const escapeHtml = (value: string) =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+
+const markdownToHtml = (markdown: string) => {
+  const trimmed = markdown.trim()
+  if (!trimmed) {
+    return ''
+  }
+  if (/<\/?[a-z][\s\S]*>/i.test(trimmed)) {
+    return trimmed
+  }
+  return marked.parse(trimmed) as string
+}
+
+const buildContentComponentHtml = (component: ContentComponent) => {
+  if (component.type === 'text') {
+    return markdownToHtml(component.markdown)
+  }
+  if (component.type === 'video') {
+    const parts = [
+      `<p><strong>Wideo:</strong> ${escapeHtml(component.title || 'Wideo')}</p>`,
+    ]
+    if (component.description) {
+      parts.push(`<p>${escapeHtml(component.description)}</p>`)
+    }
+    if (component.embedUrl) {
+      parts.push(
+        `<p><a href="${escapeHtml(component.embedUrl)}">${escapeHtml(
+          component.embedUrl,
+        )}</a></p>`,
+      )
+    } else if (component.assetId) {
+      parts.push(
+        `<p><em>Zalacznik wideo: ${escapeHtml(
+          component.assetName ?? 'Wideo',
+        )}</em></p>`,
+      )
+    }
+    return parts.join('\n')
+  }
+  const imageParts = component.images.map((image) => {
+    const label = escapeHtml(image.name ?? image.alt ?? 'Obraz')
+    const caption = image.caption?.trim()
+    if (isAssetSrc(image.src)) {
+      return `<p><em>Zalacznik: ${label}</em></p>`
+    }
+    const src = escapeHtml(image.src)
+    const alt = escapeHtml(image.alt || 'Obraz')
+    return [
+      `<p><img src="${src}" alt="${alt}" /></p>`,
+      caption ? `<p><em>${escapeHtml(caption)}</em></p>` : '',
+    ]
+      .filter(Boolean)
+      .join('\n')
+  })
+  return imageParts.join('\n')
+}
+
+const buildDownloadComponentHtml = (component: DownloadComponent) => {
+  const listItems = component.files
+    .map((file) => {
+      const label = escapeHtml(file.name)
+      return `<li>${label}${file.kind === 'asset' ? ' (zalacznik)' : ''}</li>`
+    })
+    .join('')
+  const parts = [
+    `<h3>${escapeHtml(component.label || 'Materiały do pobrania')}</h3>`,
+    listItems ? `<ul>${listItems}</ul>` : '<p>Brak materiałów.</p>',
+  ]
+  component.files
+    .filter((file) => file.kind === 'text' && file.content.trim())
+    .forEach((file) => {
+      parts.push(`<h4>${escapeHtml(file.name)}</h4>`)
+      parts.push(`<pre>${escapeHtml(file.content)}</pre>`)
+    })
+  return parts.join('\n')
+}
+
+const buildTestComponentHtml = (component: TestComponent) => {
+  const parts: string[] = [
+    `<h3>${escapeHtml(component.title || 'Test')}</h3>`,
+    `<p>Pytan: ${component.questions.length}</p>`,
+  ]
+  component.questions.forEach((question, index) => {
+    parts.push(`<h4>Pytanie ${index + 1}</h4>`)
+    parts.push(`<p>${escapeHtml(question.prompt)}</p>`)
+    question.rows.forEach((row) => {
+      row.columns.forEach((block) => {
+        parts.push(buildContentComponentHtml(block))
+      })
+    })
+    const optionItems = question.options
+      .map((option, optionIndex) => {
+        const label = OPTION_LABELS[optionIndex] ?? '?'
+        const content = escapeHtml(option.text || 'Odpowiedz')
+        if (option.isCorrect) {
+          return `<li><strong>${label}. ${content}</strong> (poprawna)</li>`
+        }
+        return `<li>${label}. ${content}</li>`
+      })
+      .join('')
+    parts.push(`<ul>${optionItems}</ul>`)
+  })
+  return parts.join('\n')
+}
+
+const buildConfluenceHtml = (lesson: Lesson, topic: Topic) => {
+  const parts: string[] = [
+    `<h1>${escapeHtml(lesson.title)}</h1>`,
+    `<p><strong>Temat:</strong> ${escapeHtml(topic.title)}</p>`,
+    `<p><strong>Poziom:</strong> ${escapeHtml(lesson.difficulty)}</p>`,
+    `<p><strong>Czas:</strong> ${escapeHtml(lesson.duration)}</p>`,
+  ]
+  if (lesson.summary) {
+    parts.push(`<p>${escapeHtml(lesson.summary)}</p>`)
+  }
+  lesson.rows.forEach((row) => {
+    row.columns.forEach((component) => {
+      if (component.type === 'download') {
+        parts.push(buildDownloadComponentHtml(component))
+        return
+      }
+      if (component.type === 'test') {
+        parts.push(buildTestComponentHtml(component))
+        return
+      }
+      parts.push(buildContentComponentHtml(component))
+    })
+  })
+  parts.push(
+    `<p><em>Wygenerowano: ${escapeHtml(
+      formatDateTime(new Date()),
+    )}</em></p>`,
+  )
+  return parts.filter(Boolean).join('\n')
+}
 
 const getLessonStats = (lesson: Lesson): LessonStats => {
   const byType: LessonStats['byType'] = {
@@ -1893,6 +2045,9 @@ function App() {
   const [assetLibrary, setAssetLibrary] = useLocalStorageState<
     AssetLibraryItem[]
   >('tga-asset-library', [])
+  const [assetLibraryModal, setAssetLibraryModal] =
+    useState<AssetLibraryModal | null>(null)
+  const [assetLibrarySearch, setAssetLibrarySearch] = useState('')
   const [activeLessonId, setActiveLessonId] = useState(
     topics[0]?.lessons[0]?.id ?? '',
   )
@@ -1995,18 +2150,14 @@ function App() {
     () => [...activeLessonVersions].sort((a, b) => b.savedAt.localeCompare(a.savedAt)),
     [activeLessonVersions],
   )
-  const libraryImages = useMemo(
-    () => assetLibrary.filter((item) => item.kind === 'image'),
-    [assetLibrary],
-  )
-  const libraryVideos = useMemo(
-    () => assetLibrary.filter((item) => item.kind === 'video'),
-    [assetLibrary],
-  )
-  const libraryFiles = useMemo(
-    () => assetLibrary.filter((item) => item.kind === 'file'),
-    [assetLibrary],
-  )
+  const librarySearch = assetLibrarySearch.trim().toLowerCase()
+  const libraryModalItems = assetLibraryModal
+    ? assetLibrary.filter(
+        (item) =>
+          item.kind === assetLibraryModal.kind &&
+          (!librarySearch || item.name.toLowerCase().includes(librarySearch)),
+      )
+    : []
   const activeTestProgress = activeTestComponent
     ? testProgress[activeTestComponent.id]
     : undefined
@@ -3213,6 +3364,62 @@ function App() {
     }))
   }
 
+  const openAssetLibrary = (kind: AssetLibraryKind, target: AssetLibraryTarget) => {
+    setAssetLibrarySearch('')
+    setAssetLibraryModal({ kind, target })
+  }
+
+  const closeAssetLibrary = () => {
+    setAssetLibraryModal(null)
+  }
+
+  const handleUseLibraryItem = (item: AssetLibraryItem) => {
+    if (!assetLibraryModal) {
+      return
+    }
+    switch (assetLibraryModal.target) {
+      case 'component-image':
+        addLibraryImageAsset(item)
+        break
+      case 'component-file':
+        addLibraryDownloadFile(item)
+        break
+      case 'component-video':
+        useLibraryVideoAsset(item)
+        closeAssetLibrary()
+        break
+      case 'question-image':
+        addLibraryQuestionImage(item)
+        break
+      case 'question-video':
+        useLibraryQuestionVideo(item)
+        closeAssetLibrary()
+        break
+      default:
+        break
+    }
+  }
+
+  const isLibraryItemSelected = (item: AssetLibraryItem) => {
+    if (!assetLibraryModal) {
+      return false
+    }
+    switch (assetLibraryModal.target) {
+      case 'component-image':
+        return componentForm.imageAssets.some((file) => file.id === item.id)
+      case 'component-file':
+        return componentForm.assetFiles.some((file) => file.id === item.id)
+      case 'component-video':
+        return componentForm.videoAsset?.id === item.id
+      case 'question-image':
+        return questionComponentForm.imageAssets.some((file) => file.id === item.id)
+      case 'question-video':
+        return questionComponentForm.videoAsset?.id === item.id
+      default:
+        return false
+    }
+  }
+
   const handlePickLibraryImages = async () => {
     const electronApi = getElectronApi()
     if (!electronApi?.pickFiles) {
@@ -3907,6 +4114,21 @@ function App() {
     }
   }
 
+  const handleExportLessonToConfluence = async () => {
+    if (!activeLesson || !activeTopic) {
+      return
+    }
+    const html = buildConfluenceHtml(activeLesson, activeTopic)
+    const fileName = `${slugify(activeTopic.title)}_Lekcja_${activeLesson.number}_confluence.html`
+    await downloadBlob(
+      new Blob([html], { type: 'text/html;charset=utf-8' }),
+      fileName,
+    )
+    window.alert(
+      'Zapisano HTML do Confluence. Wklej zawartość do Source Editor.',
+    )
+  }
+
   const handleImportLesson = async () => {
     const electronApi = getElectronApi()
     if (!electronApi?.openLessonExport || !electronApi.writeAsset) {
@@ -4135,6 +4357,14 @@ function App() {
             type="button"
           >
             Eksportuj lekcję
+          </button>
+          <button
+            className="ghost"
+            onClick={handleExportLessonToConfluence}
+            disabled={!activeLesson || !activeTopic}
+            type="button"
+          >
+            Eksportuj do Confluence
           </button>
           <button
             className="ghost"
@@ -5012,6 +5242,116 @@ function App() {
         </div>
       )}
 
+      {assetLibraryModal && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal modal-large library-modal">
+            <div className="modal-header">
+              <h3>
+                {assetLibraryModal.kind === 'image'
+                  ? 'Biblioteka obrazów'
+                  : assetLibraryModal.kind === 'video'
+                    ? 'Biblioteka wideo'
+                    : 'Biblioteka plików'}
+              </h3>
+              <button className="ghost" type="button" onClick={closeAssetLibrary}>
+                Zamknij
+              </button>
+            </div>
+            <div className="library-modal-body">
+              <div className="library-modal-toolbar">
+                <input
+                  value={assetLibrarySearch}
+                  onChange={(event) => setAssetLibrarySearch(event.target.value)}
+                  placeholder="Szukaj w bibliotece..."
+                />
+                <div className="library-modal-actions">
+                  {assetLibraryModal.kind === 'image' && (
+                    <button
+                      className="ghost small"
+                      type="button"
+                      onClick={handlePickLibraryImages}
+                    >
+                      Dodaj obrazy
+                    </button>
+                  )}
+                  {assetLibraryModal.kind === 'video' && (
+                    <button
+                      className="ghost small"
+                      type="button"
+                      onClick={handlePickLibraryVideos}
+                    >
+                      Dodaj wideo
+                    </button>
+                  )}
+                  {assetLibraryModal.kind === 'file' && (
+                    <button
+                      className="ghost small"
+                      type="button"
+                      onClick={handlePickLibraryFiles}
+                    >
+                      Dodaj pliki
+                    </button>
+                  )}
+                </div>
+              </div>
+              {libraryModalItems.length ? (
+                <div className="asset-library-grid">
+                  {libraryModalItems.map((item) => {
+                    const selected = isLibraryItemSelected(item)
+                    const actionLabel =
+                      assetLibraryModal.target === 'component-video' ||
+                      assetLibraryModal.target === 'question-video'
+                        ? selected
+                          ? 'Wybrane'
+                          : 'Użyj'
+                        : selected
+                          ? 'Dodany'
+                          : 'Dodaj'
+                    return (
+                      <div
+                        className={`asset-library-item ${
+                          selected ? 'selected' : ''
+                        }`}
+                        key={item.id}
+                      >
+                        {item.kind === 'image' ? (
+                          <ResolvedImage
+                            src={`asset:${item.id}`}
+                            alt={item.name}
+                            className="asset-library-thumb"
+                          />
+                        ) : (
+                          <div className={`asset-library-icon ${item.kind}`}>
+                            {item.kind === 'video' ? 'WIDEO' : 'PLIK'}
+                          </div>
+                        )}
+                        <div className="asset-library-meta">
+                          <strong>{item.name}</strong>
+                          <span>
+                            {ASSET_KIND_LABELS[item.kind]}
+                            {item.size ? ` • ${formatFileSize(item.size)}` : ''}
+                          </span>
+                        </div>
+                        <button
+                          className="ghost small"
+                          type="button"
+                          onClick={() => handleUseLibraryItem(item)}
+                          disabled={selected}
+                        >
+                          {actionLabel}
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p>Brak zasobów w bibliotece.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {teacherDialogOpen && (
         <div className="modal-overlay" role="dialog" aria-modal="true">
           <div className="modal">
@@ -5765,13 +6105,24 @@ function App() {
                     <div className="asset-box">
                       <div className="asset-header">
                         <span>Wideo z dysku</span>
-                        <button
-                          className="ghost small"
-                          type="button"
-                          onClick={handlePickVideoAsset}
-                        >
-                          Dodaj wideo
-                        </button>
+                        <div className="asset-header-actions">
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={handlePickVideoAsset}
+                          >
+                            Dodaj wideo
+                          </button>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() =>
+                              openAssetLibrary('video', 'component-video')
+                            }
+                          >
+                            Biblioteka
+                          </button>
+                        </div>
                       </div>
                       {componentForm.videoAsset ? (
                         <div className="asset-item">
@@ -5794,38 +6145,6 @@ function App() {
                       ) : (
                         <p>Brak dołączonego wideo.</p>
                       )}
-                      {libraryVideos.length ? (
-                        <div className="asset-library">
-                          <p className="asset-library-title">
-                            Biblioteka wideo
-                          </p>
-                          <div className="asset-library-list">
-                            {libraryVideos.map((item) => {
-                              const selected =
-                                componentForm.videoAsset?.id === item.id
-                              return (
-                                <div className="asset-library-item" key={item.id}>
-                                  <div className="asset-library-icon video">WIDEO</div>
-                                  <div className="asset-library-meta">
-                                    <strong>{item.name}</strong>
-                                    <span>
-                                      {formatFileSize(item.size) || 'wideo'}
-                                    </span>
-                                  </div>
-                                  <button
-                                    className="ghost small"
-                                    type="button"
-                                    onClick={() => useLibraryVideoAsset(item)}
-                                    disabled={selected}
-                                  >
-                                    {selected ? 'Wybrane' : 'Użyj'}
-                                  </button>
-                                </div>
-                              )
-                            })}
-                          </div>
-                        </div>
-                      ) : null}
                     </div>
                   </>
                 )}
@@ -5849,13 +6168,24 @@ function App() {
                     <div className="asset-box">
                       <div className="asset-header">
                         <span>Obrazy z dysku</span>
-                        <button
-                          className="ghost small"
-                          type="button"
-                          onClick={handlePickImageAssets}
-                        >
-                          Dodaj obrazy
-                        </button>
+                        <div className="asset-header-actions">
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={handlePickImageAssets}
+                          >
+                            Dodaj obrazy
+                          </button>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() =>
+                              openAssetLibrary('image', 'component-image')
+                            }
+                          >
+                            Biblioteka
+                          </button>
+                        </div>
                       </div>
                       {componentForm.imageAssets.length ? (
                         <div className="image-asset-grid">
@@ -5921,43 +6251,6 @@ function App() {
                       ) : (
                         <p>Brak dołączonych obrazów.</p>
                       )}
-                      {libraryImages.length ? (
-                        <div className="asset-library">
-                          <p className="asset-library-title">
-                            Biblioteka obrazów
-                          </p>
-                          <div className="asset-library-list">
-                            {libraryImages.map((item) => {
-                              const selected = componentForm.imageAssets.some(
-                                (file) => file.id === item.id,
-                              )
-                              return (
-                                <div className="asset-library-item" key={item.id}>
-                                  <ResolvedImage
-                                    src={`asset:${item.id}`}
-                                    alt={item.name}
-                                    className="asset-library-thumb"
-                                  />
-                                  <div className="asset-library-meta">
-                                    <strong>{item.name}</strong>
-                                    <span>
-                                      {formatFileSize(item.size) || 'obraz'}
-                                    </span>
-                                  </div>
-                                  <button
-                                    className="ghost small"
-                                    type="button"
-                                    onClick={() => addLibraryImageAsset(item)}
-                                    disabled={selected}
-                                  >
-                                    {selected ? 'Dodany' : 'Dodaj'}
-                                  </button>
-                                </div>
-                              )
-                            })}
-                          </div>
-                        </div>
-                      ) : null}
                     </div>
                   </>
                 )}
@@ -5993,13 +6286,24 @@ function App() {
                     <div className="asset-box">
                       <div className="asset-header">
                         <span>Pliki z dysku</span>
-                        <button
-                          className="ghost small"
-                          type="button"
-                          onClick={handlePickDownloadAssets}
-                        >
-                          Dodaj pliki
-                        </button>
+                        <div className="asset-header-actions">
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={handlePickDownloadAssets}
+                          >
+                            Dodaj pliki
+                          </button>
+                          <button
+                            className="ghost small"
+                            type="button"
+                            onClick={() =>
+                              openAssetLibrary('file', 'component-file')
+                            }
+                          >
+                            Biblioteka
+                          </button>
+                        </div>
                       </div>
                       {componentForm.assetFiles.length ? (
                         <div className="asset-list">
@@ -6024,39 +6328,6 @@ function App() {
                       ) : (
                         <p>Brak dołączonych plików.</p>
                       )}
-                      {libraryFiles.length ? (
-                        <div className="asset-library">
-                          <p className="asset-library-title">
-                            Biblioteka plików
-                          </p>
-                          <div className="asset-library-list">
-                            {libraryFiles.map((item) => {
-                              const selected = componentForm.assetFiles.some(
-                                (file) => file.id === item.id,
-                              )
-                              return (
-                                <div className="asset-library-item" key={item.id}>
-                                  <div className="asset-library-icon file">PLIK</div>
-                                  <div className="asset-library-meta">
-                                    <strong>{item.name}</strong>
-                                    <span>
-                                      {formatFileSize(item.size) || 'plik'}
-                                    </span>
-                                  </div>
-                                  <button
-                                    className="ghost small"
-                                    type="button"
-                                    onClick={() => addLibraryDownloadFile(item)}
-                                    disabled={selected}
-                                  >
-                                    {selected ? 'Dodany' : 'Dodaj'}
-                                  </button>
-                                </div>
-                              )
-                            })}
-                          </div>
-                        </div>
-                      ) : null}
                     </div>
                   </>
                 )}
@@ -6288,13 +6559,27 @@ function App() {
                                       <div className="asset-box">
                                         <div className="asset-header">
                                           <span>Obrazy z dysku</span>
-                                          <button
-                                            className="ghost small"
-                                            type="button"
-                                            onClick={handlePickQuestionImageAssets}
-                                          >
-                                            Dodaj obrazy
-                                          </button>
+                                          <div className="asset-header-actions">
+                                            <button
+                                              className="ghost small"
+                                              type="button"
+                                              onClick={handlePickQuestionImageAssets}
+                                            >
+                                              Dodaj obrazy
+                                            </button>
+                                            <button
+                                              className="ghost small"
+                                              type="button"
+                                              onClick={() =>
+                                                openAssetLibrary(
+                                                  'image',
+                                                  'question-image',
+                                                )
+                                              }
+                                            >
+                                              Biblioteka
+                                            </button>
+                                          </div>
                                         </div>
                                         {questionComponentForm.imageAssets.length ? (
                                           <div className="asset-list">
@@ -6323,50 +6608,6 @@ function App() {
                                         ) : (
                                           <p>Brak obrazow.</p>
                                         )}
-                                        {libraryImages.length ? (
-                                          <div className="asset-library">
-                                            <p className="asset-library-title">
-                                              Biblioteka obrazów
-                                            </p>
-                                            <div className="asset-library-list">
-                                              {libraryImages.map((item) => {
-                                                const selected =
-                                                  questionComponentForm.imageAssets.some(
-                                                    (file) => file.id === item.id,
-                                                  )
-                                                return (
-                                                  <div
-                                                    className="asset-library-item"
-                                                    key={item.id}
-                                                  >
-                                                    <ResolvedImage
-                                                      src={`asset:${item.id}`}
-                                                      alt={item.name}
-                                                      className="asset-library-thumb"
-                                                    />
-                                                    <div className="asset-library-meta">
-                                                      <strong>{item.name}</strong>
-                                                      <span>
-                                                        {formatFileSize(item.size) ||
-                                                          'obraz'}
-                                                      </span>
-                                                    </div>
-                                                    <button
-                                                      className="ghost small"
-                                                      type="button"
-                                                      onClick={() =>
-                                                        addLibraryQuestionImage(item)
-                                                      }
-                                                      disabled={selected}
-                                                    >
-                                                      {selected ? 'Dodany' : 'Dodaj'}
-                                                    </button>
-                                                  </div>
-                                                )
-                                              })}
-                                            </div>
-                                          </div>
-                                        ) : null}
                                       </div>
                                     </>
                                   )}
@@ -6413,13 +6654,27 @@ function App() {
                                       <div className="asset-box">
                                         <div className="asset-header">
                                           <span>Wideo z dysku</span>
-                                          <button
-                                            className="ghost small"
-                                            type="button"
-                                            onClick={handlePickQuestionVideoAsset}
-                                          >
-                                            Dodaj wideo
-                                          </button>
+                                          <div className="asset-header-actions">
+                                            <button
+                                              className="ghost small"
+                                              type="button"
+                                              onClick={handlePickQuestionVideoAsset}
+                                            >
+                                              Dodaj wideo
+                                            </button>
+                                            <button
+                                              className="ghost small"
+                                              type="button"
+                                              onClick={() =>
+                                                openAssetLibrary(
+                                                  'video',
+                                                  'question-video',
+                                                )
+                                              }
+                                            >
+                                              Biblioteka
+                                            </button>
+                                          </div>
                                         </div>
                                         {questionComponentForm.videoAsset ? (
                                           <div className="asset-item">
@@ -6446,47 +6701,6 @@ function App() {
                                         ) : (
                                           <p>Brak wideo.</p>
                                         )}
-                                        {libraryVideos.length ? (
-                                          <div className="asset-library">
-                                            <p className="asset-library-title">
-                                              Biblioteka wideo
-                                            </p>
-                                            <div className="asset-library-list">
-                                              {libraryVideos.map((item) => {
-                                                const selected =
-                                                  questionComponentForm.videoAsset?.id ===
-                                                  item.id
-                                                return (
-                                                  <div
-                                                    className="asset-library-item"
-                                                    key={item.id}
-                                                  >
-                                                    <div className="asset-library-icon video">
-                                                      WIDEO
-                                                    </div>
-                                                    <div className="asset-library-meta">
-                                                      <strong>{item.name}</strong>
-                                                      <span>
-                                                        {formatFileSize(item.size) ||
-                                                          'wideo'}
-                                                      </span>
-                                                    </div>
-                                                    <button
-                                                      className="ghost small"
-                                                      type="button"
-                                                      onClick={() =>
-                                                        useLibraryQuestionVideo(item)
-                                                      }
-                                                      disabled={selected}
-                                                    >
-                                                      {selected ? 'Wybrane' : 'Użyj'}
-                                                    </button>
-                                                  </div>
-                                                )
-                                              })}
-                                            </div>
-                                          </div>
-                                        ) : null}
                                       </div>
                                     </>
                                   )}
